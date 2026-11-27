@@ -260,7 +260,7 @@ fn prepare(staging: &Arc<Staging>, copy: &Arc<HostTexture>) -> Option<Job> {
     // Keep the sampled identity from the ordered staging step. A new sample
     // taken at retirement would acknowledge guest writes the GPU never read.
     let fingerprint = super::fingerprint(at as u64, size as u64);
-    staging.refresh(true);
+    staging.refresh(super::Refresh::Sampled);
     if !mapping.live() || super::fingerprint(at as u64, size as u64) != fingerprint {
         return None;
     }

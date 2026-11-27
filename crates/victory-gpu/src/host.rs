@@ -6939,7 +6939,7 @@ impl HostList {
                 }
                 Step::Texture { staging, uploads } => {
                     if batch.texture_due(staging) {
-                        staging.refresh(!uploads);
+                        staging.refresh(if *uploads { crate::texture::Refresh::Inline } else { crate::texture::Refresh::Sampled });
                     }
                     if *uploads {
                         staging.finish_inline_upload();
@@ -6948,7 +6948,7 @@ impl HostList {
                 }
                 Step::SampledTexture(staging, texture) => {
                     if batch.texture_due(staging) {
-                        staging.refresh(true);
+                        staging.refresh(if texture.sparse.is_some() { crate::texture::Refresh::Sparse } else { crate::texture::Refresh::Sampled });
                     }
                     uploads.extend(staging.sampled_copy(texture));
                     continue;

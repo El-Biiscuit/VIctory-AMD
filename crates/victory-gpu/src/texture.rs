@@ -64,6 +64,15 @@ pub(crate) struct Staging {
     used: std::sync::atomic::AtomicU64,
 }
 
+/// Sampled staging can be immutable while earlier copies are in flight.
+/// A reserved texture only copies resident mips through a sampled prelude.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refresh {
+    Inline,
+    Sampled,
+    Sparse,
+}
+
 /// A sampled texture copy and the exact staging revision it reads. Both
 /// resources remain live until the queue fence signals.
 #[derive(Clone)]
@@ -920,24 +929,25 @@ impl Staging {
 
     /// Detiles the texture memory into the staging buffer if it changed
     /// since the last time (and is mapped at all).
-    pub(crate) fn refresh(&self, sampled: bool) {
+    pub(crate) fn refresh(&self, mode: Refresh) {
         use std::sync::atomic::Ordering::Relaxed;
         let started = std::time::Instant::now();
-        let read = self.refresh_now(sampled);
+        let read = self.refresh_now(mode);
         let preparing = &crate::host::PREPARING;
         preparing[2].fetch_add(started.elapsed().as_micros() as u64, Relaxed);
         preparing[3].fetch_add(read as u64, Relaxed);
     }
 
     /// Returns the bytes of title memory read.
-    fn refresh_now(&self, sampled: bool) -> usize {
+    fn refresh_now(&self, mode: Refresh) -> usize {
         let whole = std::time::Instant::now();
-        let read = self.refresh_timed(sampled);
+        let read = self.refresh_timed(mode);
         REFRESH_WAITS[3].fetch_add(whole.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
         read
     }
 
-    fn refresh_timed(&self, sampled: bool) -> usize {
+    fn refresh_timed(&self, mode: Refresh) -> usize {
+        let sampled = mode != Refresh::Inline;
         let size = self.size;
         let start = self.memory as usize;
         let Some(end) = start.checked_add(size) else { return 0 };
@@ -1036,6 +1046,11 @@ impl Staging {
             } else {
                 self.first
             };
+            // Inline copies name the complete staging image when recorded.
+            // A sparse prelude transfers only resident mips. Keep the full
+            // lease so that promotion can reuse it without a new allocation.
+            let staged_first = if mode == Refresh::Sparse { first } else { self.first };
+            let size = self.layout.bytes_from(staged_first) as usize;
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
             let changed = with_read(size, |read| {
@@ -1224,6 +1239,11 @@ impl Staging {
             let f = footprint.Footprint;
             let pitch = f.RowPitch as usize;
             let len = pitch * rows as usize * f.Depth as usize;
+            // Only a sparse prelude passes a shorter, complete guest mip
+            // tail. The finer levels keep their previous contents on the GPU.
+            if tiled.len() < self.size && self.layout.bytes_from(mip) > tiled.len() as u64 {
+                continue;
+            }
             // SAFETY: the subresource's part of the mapped staging buffer.
             let linear = unsafe {
                 std::slice::from_raw_parts_mut(data.add(footprint.Offset as usize), len)
@@ -1846,6 +1866,31 @@ mod title_memory_tests {
         assert_eq!(staged_state(title), Some((true, false)));
         let tail = sparse.tiles.backed_bytes();
         assert_ne!(tail, 0);
+        // The descriptor can request mip zero before the finer pages arrive.
+        // Refresh only the complete guest prefix and retain the earlier copy
+        // while the next revision is prepared.
+        let full_plan = staging(title, &copy.texture, 0).unwrap();
+        let prefix = layout.bytes_from(2) as usize;
+        assert!(prefix < full_plan.size);
+        assert_eq!(full_plan.refresh_timed(Refresh::Sparse), prefix);
+        let earlier = full_plan.sampled_copy(&copy).unwrap();
+        assert_eq!(earlier.first, 2);
+        unsafe { source.write_bytes(0xa6, coarse) };
+        crate::watch::title_memory_remapped(source as usize, bytes);
+        upload_again(title);
+        assert_eq!(full_plan.refresh_timed(Refresh::Sparse), prefix);
+        let later = full_plan.sampled_copy(&copy).unwrap();
+        assert!(!Arc::ptr_eq(&earlier.upload, &later.upload));
+        let offset = full_plan.footprints[2].Offset as usize;
+        // SAFETY: each live revision holds a mapped lease containing mip 2.
+        unsafe {
+            assert_eq!(*earlier.upload.data().add(offset), 0x37);
+            assert_eq!(*later.upload.data().add(offset), 0xa6);
+        }
+        drop((earlier, later));
+        submit(0);
+        assert_eq!(crate::resource::sparse_sample(title).unwrap().1, Some(2));
+        assert_eq!(sparse.tiles.backed_bytes(), tail);
         // SAFETY: storage belongs to this test and the first submission finished.
         unsafe {
             let fine = source.add(coarse).cast();
@@ -2077,7 +2122,7 @@ mod title_memory_tests {
                 });
                 ready.recv().unwrap();
                 let start = Instant::now();
-                assert_eq!(staging.refresh_timed(false), staging.size);
+                assert_eq!(staging.refresh_timed(super::Refresh::Inline), staging.size);
                 eprintln!("texture refresh, overlap={overlapping}: {:?}", start.elapsed());
                 assert_eq!(finished.load(Ordering::Acquire), overlapping && !super::no_wait());
                 // SAFETY: the first texel has been staged, and nothing is writing it.
