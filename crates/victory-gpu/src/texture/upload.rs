@@ -23,7 +23,12 @@ struct Slots {
     free: Vec<u32>,
 }
 
-static POOL: Mutex<[Vec<Slots>; CLASSES]> = Mutex::new([const { Vec::new() }; CLASSES]);
+// Keep each size class independent even when growing it takes a driver call.
+// Give the contended mutex and the page vector separate cache lines.
+#[repr(align(64))]
+struct Pages(Vec<Slots>);
+
+static POOL: [Mutex<Pages>; CLASSES] = [const { Mutex::new(Pages(Vec::new())) }; CLASSES];
 static REUSE: AtomicU64 = AtomicU64::new(0);
 static CREATED: AtomicU64 = AtomicU64::new(0);
 
@@ -65,8 +70,8 @@ impl Upload {
     }
 
     fn pooled(host: &Host, class: usize, size: u64) -> Option<Self> {
-        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
-        let slots = &mut pool[class];
+        let mut pages = POOL[class].lock().unwrap_or_else(|e| e.into_inner());
+        let slots = &mut pages.0;
         if let Some(page) = slots.iter_mut().find(|page| !page.free.is_empty()) {
             let index = page.free.pop()?;
             REUSE.fetch_add(1, Relaxed);
@@ -110,8 +115,8 @@ impl Drop for Upload {
         let Some((class, index)) = self.slot else {
             return;
         };
-        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
-        let slots = &mut pool[class];
+        let mut pages = POOL[class].lock().unwrap_or_else(|e| e.into_inner());
+        let slots = &mut pages.0;
         let page_index = slots
             .iter()
             .position(|page| Arc::ptr_eq(&page.chunk, &self.chunk))
