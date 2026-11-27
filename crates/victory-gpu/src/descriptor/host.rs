@@ -634,11 +634,10 @@ impl TextureQueue {
         self.rechecks.remove(&index);
     }
 
-    /// Slot `index` was uploaded whole in `frame` from memory `at`, whose
-    /// fingerprint is `print`: looked at again ([`RECHECK_FRAMES`]), unless
-    /// it was written again meanwhile and waits in the queue.
-    fn recheck(&mut self, index: u32, frame: u64, at: (u64, u64), print: u64) {
-        if !self.slots.contains_key(&index) {
+    /// Finish the matching write and schedule another look in one step.
+    /// A replaced or removed slot must not pick up the old upload's fingerprint.
+    fn done_and_recheck(&mut self, index: u32, write: u64, frame: u64, at: (u64, u64), print: u64) {
+        if self.done(index, write) {
             let due = frame + RECHECK_FRAMES[0];
             self.rechecks.insert(index, Recheck { due, at, print, looks: 0, uploaded: frame });
         }
@@ -725,10 +724,12 @@ impl TextureQueue {
     }
 
     /// Slot `index` is up to date: out of the queue until written again.
-    fn done(&mut self, index: u32, write: u64) {
-        if self.same(index, write).is_some() {
-            self.slots.remove(&index);
+    fn done(&mut self, index: u32, write: u64) -> bool {
+        if self.same(index, write).is_none() {
+            return false;
         }
+        self.slots.remove(&index);
+        true
     }
 
     /// Nothing to upload at slot `index` now: looked at again after 1, 2,
@@ -1418,14 +1419,16 @@ impl HostHeap {
         let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
         match again {
             Some((frame, mapped)) => textures.partly(index, write, frame, mapped),
-            None => textures.done(index, write),
+            None => {
+                textures.done(index, write);
+            }
         }
     }
 
-    /// Title slot `index` was uploaded whole: see [`TextureQueue::recheck`].
-    pub(crate) fn texture_slot_recheck(&self, index: u32, frame: u64, at: (u64, u64), print: u64) {
+    /// Title slot `index` was uploaded whole: see [`TextureQueue::done_and_recheck`].
+    pub(crate) fn texture_slot_done_and_recheck(&self, index: u32, write: u64, frame: u64, at: (u64, u64), print: u64) {
         let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
-        textures.recheck(index, frame, at, print);
+        textures.done_and_recheck(index, write, frame, at, print);
     }
 
     /// Looks again at slots uploaded whole: the title writes a texture's
@@ -4263,10 +4266,9 @@ mod tests {
         let at = (0x1000, 64);
         q.written(7, 1, 1, false);
         let write = q.due(1, 1)[0].1;
-        q.recheck(7, 1, at, 5);
-        assert!(q.rechecks_due(1000, 9).is_empty(), "it waits in the queue");
-        q.done(7, write);
-        q.recheck(7, 1, at, 5);
+        q.done_and_recheck(7, write + 1, 1, at, 5);
+        assert!(q.rechecks_due(1000, 9).is_empty(), "the matching write still waits");
+        q.done_and_recheck(7, write, 1, at, 5);
         assert_eq!(q.census(1000)[0], 0, "no slot of the queue");
         let mut frame = 1;
         for wait in RECHECK_FRAMES {
@@ -4277,19 +4279,44 @@ mod tests {
             q.rechecked(7, &due[0].1, false, frame);
         }
         assert!(q.rechecks_due(u64::MAX, 9).is_empty(), "the looks are over");
-        q.recheck(7, frame, at, 5);
+        q.written(7, frame, frame, false);
+        let write = q.due(frame, 1)[0].1;
+        q.done_and_recheck(7, write, frame, at, 5);
         let due = q.rechecks_due(u64::MAX, 9);
         q.rechecked(7, &due[0].1, true, frame + 4);
         assert_eq!(q.due(frame + 4, 9)[0].0, 7);
         assert!(q.rechecks_due(u64::MAX, 9).is_empty());
         // A draw makes the host slot anew: the slot is due although a look
         // at it was still to come.
-        q.recheck(8, 1, at, 5);
+        q.written(8, frame, frame, false);
+        let write = q.slots[&8].write;
+        q.done_and_recheck(8, write, frame, at, 5);
         let seen = q.rechecks_due(u64::MAX, 9);
-        q.written(8, 2, 2, true);
-        assert!(q.due(2, 9).iter().any(|d| d.0 == 8));
-        q.rechecked(8, &seen[0].1, false, 5);
+        q.written(8, frame + 1, frame + 1, true);
+        assert!(q.due(frame + 1, 9).iter().any(|d| d.0 == 8));
+        q.rechecked(8, &seen[0].1, false, frame + 4);
         assert!(q.rechecks_due(u64::MAX, 9).is_empty());
+    }
+
+    #[test]
+    fn stale_texture_upload_keeps_the_newer_recheck() {
+        let mut q = TextureQueue::default();
+        q.written(7, 1, 1, false);
+        let old = q.due(1, 1)[0].1;
+        q.written(7, 2, 2, false);
+        let new = q.due(2, 1)[0].1;
+
+        q.done_and_recheck(7, new, 2, (0x2000, 64), 20);
+        q.done_and_recheck(7, old, 2, (0x1000, 64), 10);
+
+        let due = q.rechecks_due(6, 1);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].1.at, (0x2000, 64));
+        assert_eq!(due[0].1.print, 20);
+
+        q.remove(7);
+        q.done_and_recheck(7, old, 3, (0x1000, 64), 10);
+        assert!(q.rechecks_due(u64::MAX, 1).is_empty());
     }
 
     /// The fingerprint of a texture's memory sees a change at its start, in

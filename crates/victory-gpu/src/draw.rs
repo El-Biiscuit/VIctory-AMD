@@ -2290,14 +2290,16 @@ impl State {
             }
             HEAP_TEXTURE_BYTES.fetch_add(bytes, Ordering::Relaxed);
             HEAP_TEXTURES.fetch_add(1, Ordering::Relaxed);
-            host.texture_slot_done(index, write, again);
             if uploaded_ahead {
                 crate::texture::ahead::note_published();
             }
-            // Whole and uploaded: looked at again (`texture_slots_rechecked`).
             if let Some((at, len)) = memory {
+                // Fingerprinting reads title memory. Do it before taking the
+                // queue lock, then finish only the write we measured.
                 let fingerprint = ahead_fingerprint.unwrap_or_else(|| crate::texture::fingerprint(at, len));
-                host.texture_slot_recheck(index, frame, (at, len), fingerprint);
+                host.texture_slot_done_and_recheck(index, write, frame, (at, len), fingerprint);
+            } else {
+                host.texture_slot_done(index, write, again);
             }
         }
         catching_up(began.elapsed().saturating_sub(plain));
