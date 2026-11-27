@@ -675,6 +675,26 @@ impl Layout {
             .min(self.size)
     }
 
+    /// The bytes of tiled memory one subresource ([`Layout::detile`]'s
+    /// `mip` and `slice`) reads: from its lowest to past its highest
+    /// address. Subresources can share a range (the mips of a tail block),
+    /// so a write outside it leaves the subresource as it was and a write
+    /// inside it may or may not change it.
+    pub fn subresource_span(&self, mip: u32, slice: u32) -> Result<std::ops::Range<u64>, Error> {
+        let m = self.mips.get(mip as usize).ok_or(Error::Invalid)?;
+        let row = m.width as usize * self.desc.element_bytes as usize;
+        let plane = row * m.height as usize;
+        let (mut start, mut end) = (usize::MAX, 0);
+        self.walk(self.size as usize, mip, slice, plane * m.depth as usize, row, plane, |t, _, len| {
+            start = start.min(t);
+            end = end.max(t + len);
+        })?;
+        if start >= end {
+            return Err(Error::Invalid);
+        }
+        Ok(start as u64..end as u64)
+    }
+
     /// Copies one subresource out of tiled memory (the whole texture,
     /// [`Layout::size`] bytes, or the [`Layout::bytes_from`] of the mip)
     /// into linear rows: mip `mip` of array slice
@@ -1115,6 +1135,56 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A subresource's span holds every address of its elements and no
+    /// more than the texture, and detiling it from a copy in which only the
+    /// span is kept gives the same rows as from the whole memory.
+    #[test]
+    fn subresource_spans_hold_every_element_they_detile() {
+        let cases = [
+            desc(64, 64, 9, 16, Swizzle::SW_64KB_D),
+            desc(100, 60, 7, 4, Swizzle::SW_64KB_D),
+            desc(250, 175, 8, 8, Swizzle::SW_4KB_S),
+            desc(33, 17, 6, 1, Swizzle::SW_4KB_D),
+            desc(30, 20, 5, 4, Swizzle::LINEAR),
+            desc(513, 357, 1, 4, Swizzle::SW_64KB_R_X),
+            Desc { depth: 3, ..desc(70, 70, 4, 16, Swizzle::SW_4KB_S) },
+            Desc { dimension: Dimension::Tex3d, depth: 16, ..desc(64, 32, 7, 4, Swizzle::SW_4KB_S) },
+        ];
+        for d in cases {
+            let l = Layout::new(&d).unwrap();
+            let n = d.element_bytes as usize;
+            let tiled: Vec<u8> = (0..l.size as usize).map(|i| (i * 31 + 7) as u8).collect();
+            let slices = if d.dimension == Dimension::Tex3d { 1 } else { d.depth };
+            for slice in 0..slices {
+                for mip in 0..d.mips {
+                    let m = l.mips[mip as usize];
+                    let span = l.subresource_span(mip, slice).unwrap();
+                    assert!(span.end <= l.size, "{d:?} mip {mip} past the texture");
+                    for z in 0..m.depth {
+                        for y in 0..m.height {
+                            for x in 0..m.width {
+                                let at = l.offset(mip, x, y, slice + z).unwrap();
+                                assert!(span.contains(&at) && at + n as u64 <= span.end, "{d:?} mip {mip}");
+                            }
+                        }
+                    }
+                    let mut kept = vec![0u8; tiled.len()];
+                    let span = span.start as usize..span.end as usize;
+                    kept[span.clone()].copy_from_slice(&tiled[span]);
+                    let row = m.width as usize * n;
+                    let plane = row * m.height as usize;
+                    let (mut a, mut b) = (vec![0; plane * m.depth as usize], vec![1; plane * m.depth as usize]);
+                    l.detile(&tiled, mip, slice, &mut a, row, plane).unwrap();
+                    l.detile(&kept, mip, slice, &mut b, row, plane).unwrap();
+                    assert_eq!(a, b, "{d:?} mip {mip} slice {slice}");
+                }
+            }
+        }
+        let l = Layout::new(&desc(64, 64, 1, 16, Swizzle::SW_64KB_D)).unwrap();
+        assert_eq!(l.subresource_span(1, 0), Err(Error::Invalid));
+        assert_eq!(l.subresource_span(0, 1), Err(Error::Invalid));
     }
 
     /// Hand-checked: in a 64 KiB `D` block of 4-byte elements, x bits go to

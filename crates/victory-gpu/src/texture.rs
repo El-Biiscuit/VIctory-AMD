@@ -515,6 +515,60 @@ fn with_read<R>(size: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
     })
 }
 
+/// Whether a write-watched texture whose staging slot holds its last image
+/// detiles only the subresources written since (`VICTORY_PARTIAL_DETILE=0`
+/// detiles every change whole, as before).
+fn partial_detile() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PARTIAL_DETILE").is_none_or(|v| v != "0"))
+}
+
+/// Partial refreshes, the parts they left as they were, and the parts they
+/// looked at (for the memory line).
+#[cfg(feature = "diagnostics")]
+pub(crate) static PARTIAL_DETILES: [std::sync::atomic::AtomicU64; 3] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// The byte ranges, from the texture's start, of the write-watch pages
+/// (`crate::watch::PAGE`) written after the asking `asked`, clipped to the
+/// texture's `size` bytes at `start`.
+fn written_since(start: usize, size: usize, written: &[(usize, u64)], asked: u64) -> Vec<std::ops::Range<usize>> {
+    let page = crate::watch::PAGE;
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for &(number, stamp) in written {
+        if stamp <= asked {
+            continue;
+        }
+        let from = (number * page).max(start) - start;
+        let to = ((number + 1) * page).min(start + size).saturating_sub(start);
+        if from >= to {
+            continue;
+        }
+        match ranges.last_mut() {
+            Some(range) if range.end >= from => range.end = range.end.max(to),
+            _ => ranges.push(from..to),
+        }
+    }
+    ranges
+}
+
+/// For each (mip, slice) part, whether a write in `since` may have changed
+/// it: its memory span meets one of the ranges. A part whose span cannot
+/// be told is taken as written.
+fn parts_written(
+    layout: &victory_formats::texture::Layout,
+    parts: &[(u32, u32)],
+    since: &[std::ops::Range<usize>],
+) -> Vec<bool> {
+    parts
+        .iter()
+        .map(|&(mip, slice)| match layout.subresource_span(mip, slice) {
+            Ok(span) => since.iter().any(|w| (w.start as u64) < span.end && span.start < w.end as u64),
+            Err(_) => true,
+        })
+        .collect()
+}
+
 /// Whether a texture all of whose memory is mapped is read through the
 /// kernel's copy instead of in place (`VICTORY_TEXTURE_COPY=1`; off by
 /// default). Round 3 of the memory work read every such texture that way
@@ -954,6 +1008,10 @@ impl Staging {
         let mut last = waited(0, || self.last.lock().unwrap_or_else(|e| e.into_inner()));
         let last = &mut *last;
         if let Some((now, written)) = waited(1, || crate::watch::writes(start, end, false)) {
+            // The pages written since the staged image, when there is one of
+            // this view's mips to bring up to date in part.
+            let since = (last.asked != 0 && last.has_data && last.first == self.first && partial_detile())
+                .then(|| written_since(start, size, &written, last.asked));
             if !last.advance_watch(now, &written) {
                 return 0;
             }
@@ -967,7 +1025,7 @@ impl Staging {
                     last.asked = 0;
                     return;
                 }
-                if !self.detile(last, read, sampled) {
+                if !self.detile_written(last, read, sampled, since.as_deref()) {
                     last.asked = 0;
                 }
             });
@@ -1190,10 +1248,19 @@ impl Staging {
     /// A sampled refresh keeps any slot still in use by the queue immutable.
     /// Inline copies already name their slot in the main list.
     fn detile(&self, last: &mut Last, tiled: &[u8], sampled: bool) -> bool {
+        self.detile_written(last, tiled, sampled, None)
+    }
+
+    /// [`Staging::detile`], where `since` (byte ranges of the texture's
+    /// memory written since the staged image) lets a slot that already
+    /// holds that image detile again only the subresources the writes
+    /// reach. A new slot is detiled whole.
+    fn detile_written(&self, last: &mut Last, tiled: &[u8], sampled: bool, since: Option<&[std::ops::Range<usize>]>) -> bool {
         if sampled {
             if let Some(upload) = last.sampled.as_mut().and_then(Arc::get_mut) {
                 // Reuse the slot only after all queue references are gone.
-                if !self.detile_into(tiled, upload.data()) {
+                // It holds the latest image: a newer inline one lets it go.
+                if !self.detile_parts(tiled, upload.data(), since) {
                     last.sampled = None;
                     last.sparse_copies = Default::default();
                     last.has_data = last.inline_current;
@@ -1209,8 +1276,10 @@ impl Staging {
             }
             last.inline_current = false;
         } else {
+            // The inline slot holds the latest image only while it is current.
+            let since = since.filter(|_| last.inline_current);
             let Some(upload) = self.inline_upload() else { return false };
-            if !self.detile_into(tiled, upload.data()) {
+            if !self.detile_parts(tiled, upload.data(), since) {
                 last.inline_current = false;
                 last.has_data = last.sampled.is_some();
                 return false;
@@ -1226,8 +1295,23 @@ impl Staging {
     }
 
     fn detile_into(&self, tiled: &[u8], data: *mut u8) -> bool {
+        self.detile_parts(tiled, data, None)
+    }
+
+    /// Detiles the parts `since` reaches (all of them without it) into the
+    /// staging slot at `data`; the others keep what the slot holds.
+    fn detile_parts(&self, tiled: &[u8], data: *mut u8, since: Option<&[std::ops::Range<usize>]>) -> bool {
+        let parts: Vec<(u32, u32)> = (0..self.footprints.len()).map(|i| self.part(i)).collect();
+        let due = since.map(|since| parts_written(&self.layout, &parts, since));
         #[cfg(feature = "diagnostics")]
-        if tiled.iter().all(|&b| b == 0) {
+        if let Some(due) = &due {
+            let skipped = due.iter().filter(|&&d| !d).count() as u64;
+            PARTIAL_DETILES[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            PARTIAL_DETILES[1].fetch_add(skipped, std::sync::atomic::Ordering::Relaxed);
+            PARTIAL_DETILES[2].fetch_add(due.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(feature = "diagnostics")]
+        if due.is_none() && tiled.iter().all(|&b| b == 0) {
             tracing::debug!(
                 memory = ?self.memory,
                 desc = ?self.layout.desc,
@@ -1235,7 +1319,10 @@ impl Staging {
             );
         }
         for (i, (footprint, &rows)) in self.footprints.iter().zip(&self.rows).enumerate() {
-            let (mip, slice) = self.part(i);
+            if due.as_ref().is_some_and(|due| !due[i]) {
+                continue;
+            }
+            let (mip, slice) = parts[i];
             let f = footprint.Footprint;
             let pitch = f.RowPitch as usize;
             let len = pitch * rows as usize * f.Depth as usize;
@@ -1672,6 +1759,41 @@ mod first_mip_tests {
         assert_eq!(super::staged_part(&l, 9, 9), (0, l.size as usize), "past the chain");
         let array = layout(2);
         assert_eq!(super::staged_part(&array, 9, 4), (0, array.size as usize), "slices each hold their chain");
+    }
+
+    /// Only pages written after the last asking count, clipped to the
+    /// texture and merged where they touch.
+    #[test]
+    fn written_since_keeps_newer_pages_inside_the_texture() {
+        let page = crate::watch::PAGE;
+        let start = 10 * page + 4096;
+        let size = 3 * page;
+        let written = [(10, 9), (11, 5), (12, 9), (13, 9), (14, 9)];
+        assert_eq!(super::written_since(start, size, &written, 7), vec![0..page - 4096, 2 * page - 4096..size]);
+        assert!(super::written_since(start, size, &written, 9).is_empty());
+    }
+
+    /// A write to the mip tail leaves mip 0 of a 1024x1024 BC1 chain as it
+    /// was; a write into mip 0 leaves the tail; every mip of a slice of an
+    /// array lies in that slice's memory only.
+    #[test]
+    fn a_write_reaches_only_the_mips_whose_memory_it_touches() {
+        let l = layout(1);
+        let parts: Vec<(u32, u32)> = (0..9).map(|mip| (mip, 0)).collect();
+        let tail = l.subresource_span(8, 0).unwrap();
+        let top = l.subresource_span(0, 0).unwrap();
+        assert!(tail.end <= top.start || top.end <= tail.start, "mip 0 and the tail are apart");
+        let w = |r: std::ops::Range<u64>| vec![r.start as usize..r.start as usize + 1];
+        let due = super::parts_written(&l, &parts, &w(tail));
+        assert!(!due[0] && due[8]);
+        let due = super::parts_written(&l, &parts, &w(top));
+        assert!(due[0] && !due[8]);
+        let array = layout(4);
+        let parts: Vec<(u32, u32)> = (0..4).flat_map(|s| (0..9).map(move |m| (m, s))).collect();
+        let second = array.subresource_span(0, 1).unwrap();
+        let due = super::parts_written(&array, &parts, &w(second));
+        assert!(due[9] && due.iter().enumerate().all(|(i, &d)| !d || (9..18).contains(&i)));
+        assert!(super::parts_written(&l, &[(0, 0)], &[]).iter().all(|&d| !d));
     }
 
     #[test]

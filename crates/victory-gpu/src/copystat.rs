@@ -702,6 +702,9 @@ fn log_memory() {
         tracing::info!("small texture placements since startup: {textures} textures on {heaps} native 64 KiB heaps");
         let (created, reused) = crate::texture::upload_pool_totals();
         tracing::info!("texture staging pool since startup: {created} chunks made, {reused} allocations served by existing chunks");
+        let [refreshes, kept, parts] =
+            crate::texture::PARTIAL_DETILES.each_ref().map(|n| n.load(Relaxed));
+        tracing::info!("partial texture detiles since startup: {refreshes} refreshes kept {kept} of {parts} mips/slices as they were");
     }
     // What else holds memory: the map, on a thread of its own, with every
     // sixth line; and what the shader table and the pipeline library keep.
