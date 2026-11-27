@@ -325,6 +325,13 @@ pub(crate) fn builder_runs() -> bool {
     if b.whole {
         return true;
     }
+    // All of them to the workers first, so the ones not made yet are made
+    // side by side; this thread then makes or waits for each in turn.
+    if builder_early() {
+        for p in &b.pipelines {
+            make::soon(p, true);
+        }
+    }
     let missing = b.pipelines.iter().filter(|p| !make::now(p)).count();
     if missing > 0 {
         b.off = true;
@@ -341,6 +348,20 @@ pub(crate) fn builder_runs() -> bool {
     );
     b.whole = true;
     true
+}
+
+/// Whether the builder's pipelines are queued for the workers when the
+/// title creates them, and all at once when its first dispatch wants them,
+/// not made one after another on that dispatch's thread. Made in a row
+/// there, the 53 took 8 s with a warm driver cache and over 30 s with a cold
+/// one, while the title's main thread waited for the frame: its watchdog
+/// ended the run (a store to address 0), with 40 of the 53 made by then,
+/// about a second each. On by default; `VICTORY_BVH_BUILDER_EARLY=0` makes
+/// them as before.
+#[cfg(windows)]
+fn builder_early() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_BUILDER_EARLY").is_none_or(|v| v != "0"))
 }
 
 #[cfg(windows)]
@@ -594,6 +615,10 @@ fn hand_out(
         if !b.pipelines.iter().any(|pipeline| Arc::ptr_eq(pipeline, &host)) {
             b.pipelines.push(host.clone());
             b.whole = false;
+        }
+        drop(b);
+        if builder_allowed() && builder_early() {
+            make::soon(&host, false);
         }
     }
     let pipeline = Box::new(Pipeline {

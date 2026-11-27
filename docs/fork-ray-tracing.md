@@ -63,6 +63,13 @@ shaders and emulates the one instruction.
    partly working builder wrote garbage bounds into title memory and crashed
    the title.
 
+   Since every builder pipeline must exist before its first stage runs, they
+   are queued for the pipeline workers as the title creates them and all
+   promoted at the builder's first dispatch, so the ones not made yet are made
+   side by side (`VICTORY_BVH_BUILDER_EARLY`, on; `=0`: one after another on
+   that dispatch's thread, as before, which with a cold driver cache took
+   longer than the title's 30-second watchdog).
+
 ## Known gaps
 
 - City can take seconds per frame with the builder enabled. Buffer snapshot,
