@@ -570,18 +570,26 @@ pub(crate) fn save(now: bool) {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
     let (Some(dir), Some(library)) = (DIR.get(), library()) else { return };
-    {
-        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
-            return;
+    // A periodic save need not wait for one already in progress. A forced
+    // save waits so it can include pipelines compiled during the earlier save.
+    let mut last = if now {
+        LAST.lock().unwrap_or_else(|e| e.into_inner())
+    } else {
+        match LAST.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
         }
-        *last = Some(std::time::Instant::now());
+    };
+    if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
+        return;
     }
+    *last = Some(std::time::Instant::now());
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!(error = %e, "host pipeline library not saved");
         return;
     }
-    let tmp = dir.join(LIBRARY_FILE).with_extension("tmp");
+    let tmp = staging_path(&dir.join(LIBRARY_FILE));
     // The bytes of the library written to `tmp`; 0 when no pipeline was
     // added: the library on disk is then what it was, and only the early
     // list is written (a title pipeline first drawn with wrote all 1,352 MB
@@ -600,8 +608,10 @@ pub(crate) fn save(now: bool) {
             // SAFETY: a plain query.
             let size = unsafe { library.library.GetSerializedSize() };
             let _call = call("serialise", "the whole library");
-            if let Err(e) = serialise(&library.library, &tmp, size) {
-                tracing::warn!(error = %e, "host pipeline library not serialised");
+            if let Err(e) = serialise(&library.library, &tmp, size)
+                .and_then(|()| replace_library(dir, &tmp))
+            {
+                tracing::warn!(error = %e, "host pipeline library not saved");
                 let _ = std::fs::remove_file(&tmp);
                 return;
             }
@@ -614,8 +624,7 @@ pub(crate) fn save(now: bool) {
     // (`victory warm`) wrote an empty list over theirs, and the next world
     // began with every pipeline still to be asked for.
     let used: Vec<String> = used().iter().flatten().cloned().collect();
-    let library_written = if bytes > 0 { replace_library(dir, &tmp) } else { Ok(()) };
-    if bytes > 0 && library_written.is_ok() {
+    if bytes > 0 {
         // In place unless the system refused and the new one waits beside it.
         let in_place = !dir.join(NEXT_FILE).exists();
         if in_place && VIEW[0].load(Ordering::Relaxed) != 0 {
@@ -629,8 +638,7 @@ pub(crate) fn save(now: bool) {
             )
         });
     }
-    let written = library_written
-        .and_then(|()| write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes()));
+    let written = write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes());
     match written {
         Ok(()) => tracing::info!(
             bytes,
@@ -640,7 +648,10 @@ pub(crate) fn save(now: bool) {
             started_early = EARLY.load(Ordering::Relaxed),
             "host pipeline library saved"
         ),
-        Err(e) => tracing::warn!(error = %e, "host pipeline library not saved"),
+        Err(e) => {
+            USED_CHANGED.store(true, Ordering::Relaxed);
+            tracing::warn!(error = %e, "early pipeline list not saved");
+        }
     }
 }
 
@@ -663,20 +674,27 @@ fn serialise(library: &ID3D12PipelineLibrary1, tmp: &std::path::Path, size: usiz
     std::fs::write(tmp, &bytes)
 }
 
-/// Renames the written library `tmp` over the library's file in `dir`. This
-/// run may have that file mapped: Windows 11 replaces a mapped file, and
-/// the mapping goes on reading the old one for as long as a handle on it
-/// is open ([`holds`]; with none, only the pages in memory at that moment
-/// stay: the rest read as zeros). Where a system refuses, the new library
-/// is left beside it as [`NEXT_FILE`] for the next start.
+/// Publishes the written library as [`NEXT_FILE`], then promotes it to the
+/// live file when possible. If the live file cannot be replaced, the next
+/// start can promote the complete pending generation.
 fn replace_library(dir: &std::path::Path, tmp: &std::path::Path) -> std::io::Result<()> {
-    std::fs::rename(tmp, dir.join(LIBRARY_FILE)).or_else(|_| std::fs::rename(tmp, dir.join(NEXT_FILE)))
+    // Always replace the pending generation first. If a previous save had
+    // to remain beside the live file it cannot overwrite this save at startup.
+    let next = dir.join(NEXT_FILE);
+    std::fs::rename(tmp, &next)?;
+    let _ = std::fs::rename(next, dir.join(LIBRARY_FILE));
+    Ok(())
+}
+
+/// Saves are serialized in this process; another process may use the same cache.
+fn staging_path(path: &std::path::Path) -> PathBuf {
+    path.with_extension(format!("{}.tmp", std::process::id()))
 }
 
 /// Writes `bytes` to a temporary file beside `path`, then renames it over
 /// `path`: a reader never sees a part.
 fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let tmp = staging_path(path);
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }
@@ -771,6 +789,40 @@ mod tests {
         // The next start reads the new one, wherever the save left it.
         assert_eq!(Blob::of(dir.path()).bytes(), &new[..]);
         assert!(!dir.path().join(NEXT_FILE).exists());
+    }
+
+    #[test]
+    fn a_pending_library_cannot_roll_back_a_later_save() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join(LIBRARY_FILE);
+        let next = dir.path().join(NEXT_FILE);
+        let tmp = dir.path().join("writer.tmp");
+        std::fs::write(&live, b"first").unwrap();
+        let hold = |path: &std::path::Path| {
+            const FILE_SHARE_READ: u32 = 1;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(path)
+                .unwrap()
+        };
+        let lock = hold(&live);
+        std::fs::write(&tmp, b"second").unwrap();
+        replace_library(dir.path(), &tmp).unwrap();
+        assert_eq!(std::fs::read(&next).unwrap(), b"second");
+        drop(lock);
+
+        // Someone holding the pending file must not cause an older pending
+        // generation to be left behind a newer live one.
+        let lock = hold(&next);
+        std::fs::write(&tmp, b"third").unwrap();
+        assert!(replace_library(dir.path(), &tmp).is_err());
+        assert_eq!(std::fs::read(&live).unwrap(), b"first");
+        drop(lock);
+        replace_library(dir.path(), &tmp).unwrap();
+        assert_eq!(Blob::of(dir.path()).bytes(), b"third");
+        assert!(!next.exists());
     }
 
     /// The bytes at `at` of the pattern the test below writes.
