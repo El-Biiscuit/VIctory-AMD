@@ -7640,6 +7640,10 @@ impl<'a> Lower<'a> {
                     return Err("a lane write in a half-wave");
                 }
                 let me = self.console_lane();
+                // The lane is S1[4:0] in a 32-lane wave, S1[5:0] in a 64-lane one (T-0046):
+                // a select past the wave wraps instead of writing no lane.
+                let wrap = self.s.m.i32(self.wave() - 1);
+                let lane = self.s.m.bin(c, Bin::And, lane, wrap);
                 let is = self.s.m.cmp(c, pred::EQ, me, lane);
                 let r = self.s.m.select(c, is, a, old);
                 int(self, r)
