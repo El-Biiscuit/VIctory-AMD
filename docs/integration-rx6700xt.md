@@ -17,7 +17,6 @@ Base : `main` = `DexNom/VIctory@4ad8692`. Au moment de la sélection, 148 PR ét
 | #54 (partie shader) | `ds_bpermute` wave64 traité par demi-wave de 32 lanes (ISA RDNA2 §10.4.4), lookups BVH | Corrige la sémantique des shaders du jeu sur un hôte wave64 (masques d'ombre en damier). Voir le commit pour la résolution de conflit. |
 | #17 | Thin LTO, un seul codegen unit | Gain CPU gratuit (hachage, copies, traduction). Le build est plus long. |
 | #121 | Pipelines du builder BVH mis en file dès leur création et compilés en parallèle | Évite que les 53 pipelines compilés en série à froid déclenchent le watchdog de 30 s, ce qui est plus probable sur une carte plus lente. `VICTORY_BVH_BUILDER_EARLY=0` pour désactiver. |
-| #75 | Diffère le rattrapage des textures quand la marge de commit Windows est basse | Moins de pics et d'erreurs de commit. |
 | #18 | Table des vues en `RwLock` | Moins de contention entre enregistreurs de command lists. |
 | #129 | Classes de taille d'upload de textures sur des verrous séparés | Moins de contention au streaming. |
 | #85 | Revérification des textures conservée quand un slot de descripteur est réutilisé | Moins de textures périmées ou noires. |
@@ -30,6 +29,7 @@ Base : `main` = `DexNom/VIctory@4ad8692`. Au moment de la sélection, 148 PR ét
 
 ## Écarté, et pourquoi
 
+- **#75 (retirée après test sur la 6700 XT, 28/11).** Elle coupe le rattrapage accéléré des textures dès que la marge de commit du *système* (`ullAvailPageFile`) passe sous 4 Gio. En jeu, le runtime monte à 20–23 Go de RAM : la condition est vraie en permanence, les textures en attente montent à environ 8 000 et ne se rattrapent pas (visages et matériaux manquants, pire que `main`).
 - **#60 (limite de taille des mips des textures streamées)**, pourtant testée sur une 6700 XT (10,0 → 8,6 Go). Elle a été écrite avant la refonte du staging et du sparse des textures de `main` (`ab34a8b`). Le portage n'est plus une résolution de conflit : le staging, `note_texture_mips`/`texture_covers`, les uploads « ahead » et les préludes sparse supposent tous que les mips du jeu et de l'hôte ont la même numérotation. Un portage à l'aveugle risque des textures corrompues ou une perte du device. À refaire dans une branche séparée, testée en jeu.
 - **#43** sérialise toute la création de PSO sur AMD (contournement RDNA4). Ça ralentirait la compilation à froid sur RDNA2 sans rien apporter.
 - **#45, #56, #7, #23, #8** : contournements de crashs du compilateur RDNA4 (`amdxc64.dll`). #23 (garde SEH) n'est utile qu'en cas de crash dans `amdxc64.dll`.
