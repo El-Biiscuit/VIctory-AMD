@@ -67,6 +67,8 @@ For a separate partial RT experiment, replace `--no-rt` with `--rt-static-bvh` a
 
 Keep the scene and resolution the same when comparing the two modes. Include the GPU actually used, its driver, frame times, and any lighting issues. The file `logs\latest.txt` points to the run log, which records the requested ray-tracing mode.
 
+Texture catch-up uses the regular staging budget below 4096 MiB of available process commit. Set `VICTORY_TEXTURE_CATCHUP_COMMIT_MIB` to choose a different reserve in MiB. Set it to `0` to disable the commit check for catch-up.
+
 ## Things to Be Done
 
 A fresh public download reached the City waterfront on an RX 7900 XTX with FSR 4.1.2 and ray tracing enabled. The first in-game frames took longer while pipelines compiled. Warm samples reached about 1.1–1.3 FPS with zero dropped draws. Some materials still rendered black.

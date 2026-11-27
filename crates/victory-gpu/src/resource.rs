@@ -1442,6 +1442,12 @@ pub(crate) fn host_made<'a>(
     Some(unsafe { &*std::ptr::from_ref(&host.texture) })
 }
 
+/// Measured commit headroom below the reserve for accelerated staging.
+#[cfg(any(windows, test))]
+pub(crate) fn staging_commit_pressure(headroom: Option<u64>, reserve: u64) -> Option<u64> {
+    headroom.filter(|&bytes| bytes < reserve)
+}
+
 /// Whether more host copies of textures the title fills may be made for
 /// shaders that pick textures by index (`draw.rs` `heap_textures`): always
 /// up to `FLOOR` bytes of them, beyond that while the card's memory in use
@@ -2860,6 +2866,23 @@ static RESOURCE_FUNCTIONS: Table<32> = {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn staging_commit_pressure_ends_when_the_reserve_is_available() {
+        use super::staging_commit_pressure;
+        let reserve = 4 << 30;
+        assert_eq!(staging_commit_pressure(Some(0), reserve), Some(0));
+        assert_eq!(staging_commit_pressure(Some(reserve - 1), reserve), Some(reserve - 1));
+        assert_eq!(staging_commit_pressure(Some(reserve), reserve), None);
+        assert_eq!(staging_commit_pressure(Some(reserve + 1), reserve), None);
+    }
+
+    #[test]
+    fn staging_commit_pressure_requires_a_measurement_and_reserve() {
+        use super::staging_commit_pressure;
+        assert_eq!(staging_commit_pressure(None, 4 << 30), None);
+        assert_eq!(staging_commit_pressure(Some(0), 0), None);
+    }
+
     use super::*;
     use crate::object::slot;
 

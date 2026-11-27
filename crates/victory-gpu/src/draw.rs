@@ -2038,15 +2038,35 @@ impl State {
         static CATCHUP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let catchup = *CATCHUP.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_CATCHUP").is_none_or(|v| v != "0"));
         let plain = span;
-        let (per_frame, span) = if catchup && census[0] > LONG && catching_up(std::time::Duration::ZERO) {
-            (per_frame.max(PER_FRAME_CATCHING_UP), span.max(SPAN_CATCHING_UP))
+        let pass_budget = PASS_BUDGET.get();
+        let (per_frame, span) = if pass_budget.is_none() && catchup && census[0] > LONG
+            && catching_up(std::time::Duration::ZERO)
+        {
+            const MIB: u64 = 1 << 20;
+            static RESERVE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+            let reserve = *RESERVE.get_or_init(|| {
+                std::env::var("VICTORY_TEXTURE_CATCHUP_COMMIT_MIB").ok()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(4096).saturating_mul(MIB)
+            });
+            let headroom = (reserve != 0)
+                .then(crate::host::available_system_memory)
+                .flatten()
+                .map(|(_, commit)| commit);
+            if let Some(commit) = crate::resource::staging_commit_pressure(headroom, reserve) {
+                once!(commit_mib = commit / MIB, reserve_mib = reserve / MIB,
+                    "texture catch-up deferred under low commit headroom");
+                (per_frame, span)
+            } else {
+                (per_frame.max(PER_FRAME_CATCHING_UP), span.max(SPAN_CATCHING_UP))
+            }
         } else {
             (per_frame, span)
         };
         // A run made early (`State::early_textures`) has a budget of its
         // own: its bytes on top of what the frame has spent so far.
         // (Not `most`: that is the longest wait between looks, used below.)
-        let (span, bytes_at_most) = match PASS_BUDGET.get() {
+        let (span, bytes_at_most) = match pass_budget {
             Some((ms, bytes)) => {
                 (std::time::Duration::from_millis(ms), SPENT.load(Ordering::Relaxed).saturating_add(bytes))
             }
