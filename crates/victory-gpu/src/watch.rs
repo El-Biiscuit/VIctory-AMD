@@ -381,6 +381,219 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     ))
 }
 
+/// Statistics of the guards' protection changes (`VirtualProtect`) and of
+/// the waits around them: diagnostics builds and tests only, and nothing
+/// they count changes what the guards do. `VICTORY_PROTECT_STATS=0` leaves
+/// out the clock readings and counting (diagnostics builds).
+///
+/// Every number is summed over all threads. What is spent on a thread that
+/// is inside a submission ([`set_submitting`], from `copystat`) is also
+/// summed apart: that part holds the submission lock, the frame waits for
+/// it. The rest runs on the title's threads (faults, its kernel reads) or
+/// ours beside the submissions (the relay, texture refreshes).
+#[cfg(any(test, feature = "diagnostics"))]
+pub(crate) mod stats {
+    use super::{Change, Wait};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    /// The kinds of [`Change`].
+    pub(crate) const CHANGES: usize = 7;
+    /// Per change: calls, blocks, failed calls, microseconds, microseconds
+    /// on a submitting thread, and runs of contiguous blocks (what the
+    /// calls could have been, for the kinds that make one call per block).
+    pub(crate) const CALLS: usize = 0;
+    pub(crate) const BLOCKS: usize = 1;
+    pub(crate) const FAILED: usize = 2;
+    pub(crate) const US: usize = 3;
+    pub(crate) const US_SUBMITTING: usize = 4;
+    pub(crate) const RUNS: usize = 5;
+    pub(crate) const FIELDS: usize = 6;
+    /// Beside them: write faults the handler took and their microseconds;
+    /// per [`Wait`], the lock waits and their microseconds; the checks that
+    /// guarded, their calls, and the calls joining runs across blocks
+    /// already guarded would have made.
+    pub(crate) const FAULTS: usize = 0;
+    pub(crate) const FAULT_US: usize = 1;
+    pub(crate) const WAITS: usize = 2; // then US of it, per Wait: 2..8
+    pub(crate) const CHECKS: usize = 8;
+    pub(crate) const CHECK_CALLS: usize = 9;
+    pub(crate) const CHECK_JOINED: usize = 10;
+    pub(crate) const OTHERS: usize = 11;
+
+    static CHANGE: [[AtomicU64; FIELDS]; CHANGES] = [const { [const { AtomicU64::new(0) }; FIELDS] }; CHANGES];
+    static OTHER: [AtomicU64; OTHERS] = [const { AtomicU64::new(0) }; OTHERS];
+
+    thread_local! {
+        /// This thread is inside a submission.
+        static SUBMITTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// The same counts for this thread alone, for tests (other tests
+        /// run on other threads meanwhile).
+        static MINE: std::cell::RefCell<([[u64; FIELDS]; CHANGES], [u64; OTHERS])> =
+            const { std::cell::RefCell::new(([[0; FIELDS]; CHANGES], [0; OTHERS])) };
+    }
+
+    pub(super) fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("VICTORY_PROTECT_STATS").is_none_or(|v| v != "0"))
+    }
+
+    fn add(change: Change, field: usize, n: u64) {
+        CHANGE[change as usize][field].fetch_add(n, Relaxed);
+        #[cfg(test)]
+        MINE.with(|m| m.borrow_mut().0[change as usize][field] += n);
+    }
+
+    fn add_other(field: usize, n: u64) {
+        OTHER[field].fetch_add(n, Relaxed);
+        #[cfg(test)]
+        MINE.with(|m| m.borrow_mut().1[field] += n);
+    }
+
+    /// The thread enters or leaves a submission (`copystat`).
+    pub(crate) fn set_submitting(on: bool) {
+        SUBMITTING.with(|s| s.set(on));
+    }
+
+    pub(super) fn timed(change: Change, blocks: usize, call: impl FnOnce() -> bool) -> bool {
+        if !on() {
+            return call();
+        }
+        let started = std::time::Instant::now();
+        let done = call();
+        let us = started.elapsed().as_micros() as u64;
+        add(change, CALLS, 1);
+        add(change, BLOCKS, blocks as u64);
+        add(change, US, us);
+        if SUBMITTING.with(|s| s.get()) {
+            add(change, US_SUBMITTING, us);
+        }
+        if !done {
+            add(change, FAILED, 1);
+        }
+        done
+    }
+
+    /// Runs of contiguous blocks in `blocks` (in any order, repeats
+    /// allowed).
+    pub(crate) fn runs_of(mut blocks: Vec<usize>) -> usize {
+        blocks.sort_unstable();
+        blocks.dedup();
+        blocks.windows(2).filter(|w| w[1] != w[0] + 1).count() + usize::from(!blocks.is_empty())
+    }
+
+    /// `blocks` were changed one call each for `change`: how many runs
+    /// they make.
+    pub(super) fn runs(change: Change, blocks: Vec<usize>) {
+        if on() && !blocks.is_empty() {
+            add(change, RUNS, runs_of(blocks) as u64);
+        }
+    }
+
+    /// How many calls the runs `guarded` (in order) need when two runs
+    /// with only guarded blocks between them (`all_guarded(from, to)`) are
+    /// joined into one.
+    pub(crate) fn joined_calls(guarded: &[(usize, usize)], all_guarded: impl Fn(usize, usize) -> bool) -> usize {
+        let mut calls = 0;
+        let mut end = None;
+        for &(from, to) in guarded {
+            match end {
+                Some(e) if e <= from && all_guarded(e, from) => {}
+                _ => calls += 1,
+            }
+            end = Some(to);
+        }
+        calls
+    }
+
+    /// A check guarded the runs `guarded`.
+    pub(super) fn check_guarded(guarded: &[(usize, usize)], all_guarded: impl Fn(usize, usize) -> bool) {
+        if !on() || guarded.is_empty() {
+            return;
+        }
+        add_other(CHECKS, 1);
+        add_other(CHECK_CALLS, guarded.len() as u64);
+        add_other(CHECK_JOINED, joined_calls(guarded, all_guarded) as u64);
+    }
+
+    /// Takes the guard lock with `lock`, counting the wait.
+    pub(super) fn waited<T>(who: Wait, lock: impl FnOnce() -> T) -> T {
+        if !on() {
+            return lock();
+        }
+        let started = std::time::Instant::now();
+        let held = lock();
+        let at = WAITS + 2 * who as usize;
+        add_other(at, 1);
+        add_other(at + 1, started.elapsed().as_micros() as u64);
+        held
+    }
+
+    /// A write fault in the handler, from [`Fault::begin`] to its drop.
+    pub(super) struct Fault(Option<std::time::Instant>);
+
+    impl Fault {
+        pub(super) fn begin() -> Fault {
+            Fault(on().then(std::time::Instant::now))
+        }
+    }
+
+    impl Drop for Fault {
+        fn drop(&mut self) {
+            if let Some(started) = self.0 {
+                add_other(FAULTS, 1);
+                add_other(FAULT_US, started.elapsed().as_micros() as u64);
+            }
+        }
+    }
+
+    /// The counts since the last call, reset.
+    pub(crate) fn take() -> ([[u64; FIELDS]; CHANGES], [u64; OTHERS]) {
+        (
+            CHANGE.each_ref().map(|c| c.each_ref().map(|v| v.swap(0, Relaxed))),
+            OTHER.each_ref().map(|v| v.swap(0, Relaxed)),
+        )
+    }
+
+    /// This thread's counts since the last call, reset (tests).
+    #[cfg(test)]
+    pub(crate) fn mine() -> ([[u64; FIELDS]; CHANGES], [u64; OTHERS]) {
+        MINE.with(|m| std::mem::replace(&mut *m.borrow_mut(), ([[0; FIELDS]; CHANGES], [0; OTHERS])))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{joined_calls, runs_of};
+
+        #[test]
+        fn runs_count_contiguous_blocks() {
+            assert_eq!(runs_of(vec![]), 0);
+            assert_eq!(runs_of(vec![7]), 1);
+            assert_eq!(runs_of(vec![3, 4, 5]), 1);
+            assert_eq!(runs_of(vec![5, 3, 4, 9, 10, 4]), 2);
+            assert_eq!(runs_of(vec![1, 3, 5]), 3);
+            assert_eq!(runs_of(vec![usize::MAX - 1, usize::MAX]), 1);
+        }
+
+        #[test]
+        fn runs_join_only_across_guarded_blocks() {
+            let all = |_: usize, _: usize| true;
+            let none = |a: usize, b: usize| a == b;
+            assert_eq!(joined_calls(&[], all), 0);
+            assert_eq!(joined_calls(&[(0, 2), (5, 6), (9, 12)], all), 1);
+            // Touching runs join with nothing between them.
+            assert_eq!(joined_calls(&[(0, 2), (2, 4), (7, 8)], none), 2);
+            assert_eq!(joined_calls(&[(0, 2), (5, 6), (9, 12)], none), 3);
+            // Blocks 2..5 guarded, 6..9 not.
+            let some = |a: usize, b: usize| b <= 5 || a >= 9;
+            assert_eq!(joined_calls(&[(0, 2), (5, 6), (9, 12)], some), 2);
+        }
+    }
+}
+
 /// Guarded blocks of view memory.
 const BLOCK: usize = PAGE;
 
@@ -474,6 +687,66 @@ fn guards() -> std::sync::MutexGuard<'static, Guards> {
     GUARDS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Who waits for the guard lock, for the statistics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wait {
+    /// A check of a copy's range ([`guard`]).
+    Check,
+    /// The handler of a write to a guarded block (the title's thread).
+    Fault,
+    /// A write the runtime or we tell of ([`writing`]).
+    Write,
+}
+
+/// [`guards`], with the wait for the lock counted.
+fn guard_lock(who: Wait) -> std::sync::MutexGuard<'static, Guards> {
+    #[cfg(any(test, feature = "diagnostics"))]
+    {
+        stats::waited(who, guards)
+    }
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    {
+        let _ = who;
+        guards()
+    }
+}
+
+/// What a protection change is for, for the statistics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// A check guarding blocks a copy has taken, one call per run.
+    Guard = 0,
+    /// The same, block by block after the run's call failed.
+    GuardRetry,
+    /// Another view of pages just guarded ([`protect_alias`]).
+    Alias,
+    /// Opening a block for a write that faulted (the title's thread).
+    OpenFault,
+    /// Opening for a write told ([`writing`]: the runtime's kernel reads,
+    /// our writes into title memory).
+    OpenWrite,
+    /// Opening the other views of a block opened ([`open`]).
+    OpenAlias,
+    /// Opening blocks of which a new view was mapped ([`views_mapped`]).
+    OpenMapped,
+}
+
+/// One `VirtualProtect` over `blocks` blocks: `call` makes it and says
+/// whether it succeeded. With statistics on, it is counted and timed;
+/// nothing else changes.
+#[inline]
+fn protect_call(change: Change, blocks: usize, call: impl FnOnce() -> bool) -> bool {
+    #[cfg(any(test, feature = "diagnostics"))]
+    {
+        stats::timed(change, blocks, call)
+    }
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    {
+        let _ = (change, blocks);
+        call()
+    }
+}
+
 /// For view memory: the pages of `[start, end)`'s blocks written since
 /// they were last guarded (all of a block's pages), guarding them again
 /// before the caller copies them. `None` if the memory is not a view.
@@ -495,10 +768,20 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
         return None;
     }
     install();
-    let mut g = guards();
+    let mut g = guard_lock(Wait::Check);
     let mut written = Vec::new();
     let (first, last) = (start / BLOCK, end.div_ceil(BLOCK));
     let mut uncommitted_until = first;
+    // The runs this check guards, for the statistics: how many calls a
+    // join across blocks already guarded would have made.
+    #[cfg(any(test, feature = "diagnostics"))]
+    let mut guarded: Vec<(usize, usize)> = Vec::new();
+    #[cfg_attr(not(any(test, feature = "diagnostics")), allow(unused_mut))]
+    let mut protect = |g: &mut Guards, from: usize, to: usize| {
+        #[cfg(any(test, feature = "diagnostics"))]
+        guarded.push((from, to));
+        protect(g, from, to);
+    };
     for gap in g.clean.gaps(first, last) {
         let mut run = None;
         for block in gap.clone() {
@@ -532,6 +815,12 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
             protect(&mut g, from, gap.end);
         }
     }
+    // Between two runs: guarded if every block there is clean or, not
+    // clean, still read-only (a few blocks at most; no walk of the set).
+    #[cfg(any(test, feature = "diagnostics"))]
+    stats::check_guarded(&guarded, |a, b| {
+        g.clean.gaps(a, b).into_iter().flatten().all(|block| g.protected.contains(&block))
+    });
     Some(written)
 }
 
@@ -590,6 +879,10 @@ fn protect(g: &mut Guards, from: usize, to: usize) {
     if !view_guard() {
         return;
     }
+    // The other views' blocks this guarded, for the statistics (one call
+    // each now; runs of them could be one call).
+    #[cfg(any(test, feature = "diagnostics"))]
+    let mut aliases: Vec<usize> = Vec::new();
     for (base, bytes) in crate::inplace::views_between(from.saturating_mul(BLOCK), to.saturating_mul(BLOCK)) {
         let first = (base / BLOCK).max(from);
         let last = (base.saturating_add(bytes).div_ceil(BLOCK)).min(to);
@@ -606,12 +899,15 @@ fn protect(g: &mut Guards, from: usize, to: usize) {
             for alias in shown {
                 let alias = alias / BLOCK;
                 g.aliased.insert(alias);
-                if alias != block {
-                    protect_alias(g, alias);
+                if alias != block && protect_alias(g, alias) {
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    aliases.push(alias);
                 }
             }
         }
     }
+    #[cfg(any(test, feature = "diagnostics"))]
+    stats::runs(Change::Alias, aliases);
 }
 
 /// Views of one page past which its views are not guarded together.
@@ -638,43 +934,48 @@ pub(crate) static ALIASES: [std::sync::atomic::AtomicU64; 3] = [const { std::syn
 /// reports a block that is read-only and not clean as written, then notes it
 /// clean). A block that is clean stays so: had the pages been written since
 /// its copies took them, `open` would have opened it.
-fn protect_alias(g: &mut Guards, block: usize) {
+/// Returns whether it made the block read-only now.
+fn protect_alias(g: &mut Guards, block: usize) -> bool {
     use windows_sys::Win32::System::Memory::{PAGE_READONLY, VirtualProtect};
     if g.protected.contains(&block) {
-        return;
+        return false;
     }
     let mut old = 0;
     // SAFETY: title view memory; only its protection changes.
-    if unsafe { VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READONLY, &mut old) } != 0 {
+    let done = protect_call(Change::Alias, 1, || unsafe {
+        VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READONLY, &mut old) != 0
+    });
+    if done {
         g.protected.insert(block);
     }
+    done
 }
 
 /// [`protect`] for one range, without the other views of its pages.
 fn protect_here(g: &mut Guards, from: usize, to: usize) {
     use windows_sys::Win32::System::Memory::{PAGE_READONLY, VirtualProtect};
-    let set = |from: usize, to: usize| {
+    let set = |change: Change, from: usize, to: usize| {
         let mut old = 0;
         // SAFETY: title view memory; only its protection changes.
-        unsafe {
+        protect_call(change, to - from, || unsafe {
             VirtualProtect(
                 (from * BLOCK) as *const _,
                 (to - from) * BLOCK,
                 PAGE_READONLY,
                 &mut old,
             ) != 0
-        }
+        })
     };
     let note = |g: &mut Guards, from: usize, to: usize| {
         g.protected.extend(from..to);
         g.clean.insert(from, to);
     };
-    if set(from, to) {
+    if set(Change::Guard, from, to) {
         note(g, from, to);
         return;
     }
     for block in from..to {
-        if set(block, block + 1) {
+        if set(Change::GuardRetry, block, block + 1) {
             note(g, block, block + 1);
         } else if block < uncommitted_end(block) {
             g.absent.insert(block);
@@ -703,27 +1004,42 @@ fn uncommitted_end(block: usize) -> usize {
 /// every other view of them are opened too: the write that faulted (or is
 /// ours, `crate::host::copy_mapped`) goes through one view, and every
 /// guard over the pages must copy them again.
-fn open(g: &mut Guards, start: usize, end: usize) -> bool {
-    let any = open_here(g, start, end);
+fn open(g: &mut Guards, start: usize, end: usize, why: Change) -> bool {
+    let opened = open_here(g, start, end, why);
+    let any = !opened.is_empty();
+    #[cfg(any(test, feature = "diagnostics"))]
+    stats::runs(why, opened);
     if start >= end || g.aliased.is_empty() {
         return any;
     }
+    // The other views' blocks this opens, for the statistics (one call
+    // each now; runs of them could be one call).
+    #[cfg(any(test, feature = "diagnostics"))]
+    let mut others: Vec<usize> = Vec::new();
     let aliased: Vec<usize> = g.aliased.range(start / BLOCK..end.div_ceil(BLOCK)).copied().collect();
     for block in aliased {
         g.aliased.remove(&block);
         for alias in crate::inplace::pages_of(block * BLOCK) {
-            if alias / BLOCK != block && open_here(g, alias, alias.saturating_add(BLOCK)) {
-                #[cfg(feature = "diagnostics")]
-                ALIASES[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if alias / BLOCK != block {
+                let opened = open_here(g, alias, alias.saturating_add(BLOCK), Change::OpenAlias);
+                if !opened.is_empty() {
+                    #[cfg(feature = "diagnostics")]
+                    ALIASES[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    others.extend(opened);
+                }
             }
             g.aliased.remove(&(alias / BLOCK));
         }
     }
+    #[cfg(any(test, feature = "diagnostics"))]
+    stats::runs(Change::OpenAlias, others);
     any
 }
 
-/// [`open`] for one range, without the other views of its pages.
-fn open_here(g: &mut Guards, start: usize, end: usize) -> bool {
+/// [`open`] for one range, without the other views of its pages; `why`
+/// names the cause for the statistics. Returns the blocks it opened.
+fn open_here(g: &mut Guards, start: usize, end: usize, why: Change) -> Vec<usize> {
     use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
     let blocks: Vec<usize> = g
         .protected
@@ -735,9 +1051,11 @@ fn open_here(g: &mut Guards, start: usize, end: usize) -> bool {
         g.clean.remove(block);
         let mut old = 0;
         // SAFETY: a block we made read-only.
-        unsafe { VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old) };
+        protect_call(why, 1, || unsafe {
+            VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old) != 0
+        });
     }
-    !blocks.is_empty()
+    blocks
 }
 
 /// Before our own write into title memory `[at, at + len)` through the
@@ -746,7 +1064,7 @@ fn open_here(g: &mut Guards, start: usize, end: usize) -> bool {
 /// reads into its own memory.
 pub fn writing(at: usize, len: usize) {
     // The length is the title's (`fread`'s size times count, saturated).
-    open(&mut guards(), at, at.saturating_add(len));
+    open(&mut guard_lock(Wait::Write), at, at.saturating_add(len), Change::OpenWrite);
     // A placed texture there changes with no descriptor written.
     crate::descriptor::host::remapped(at, len);
 }
@@ -774,12 +1092,19 @@ pub(crate) fn views_mapped(section: usize, offset: u64, len: usize) {
         return;
     }
     let mut g = guards();
+    #[cfg(any(test, feature = "diagnostics"))]
+    let mut opened_all: Vec<usize> = Vec::new();
     for &(at, n) in &ranges {
-        if open_here(&mut g, at, at.saturating_add(n)) {
+        let opened = open_here(&mut g, at, at.saturating_add(n), Change::OpenMapped);
+        if !opened.is_empty() {
             #[cfg(feature = "diagnostics")]
             ALIASES[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(any(test, feature = "diagnostics"))]
+            opened_all.extend(opened);
         }
     }
+    #[cfg(any(test, feature = "diagnostics"))]
+    stats::runs(Change::OpenMapped, opened_all);
 }
 
 /// A direct read pins the virtual addresses it will read. A mapping change
@@ -956,11 +1281,13 @@ fn install() {
             return EXCEPTION_CONTINUE_SEARCH;
         }
         let at = r.ExceptionInformation[1];
+        #[cfg(any(test, feature = "diagnostics"))]
+        let _fault = stats::Fault::begin();
         // Held across both checks: another thread may have opened the block
         // since this one faulted, and a copy may have guarded it again since
         // (then it is ours again, not read-only for some other reason).
-        let mut g = guards();
-        if open(&mut g, at, at + 1) {
+        let mut g = guard_lock(Wait::Fault);
+        if open(&mut g, at, at + 1, Change::OpenFault) {
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::GuardFaults, 1);
             return EXCEPTION_CONTINUE_EXECUTION;
@@ -974,6 +1301,9 @@ fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     // SAFETY: the handler only touches our guard state and protections.
     ONCE.call_once(|| unsafe {
+        // The statistics' switch is read here, not first in the handler.
+        #[cfg(any(test, feature = "diagnostics"))]
+        stats::on();
         AddVectoredExceptionHandler(1, Some(on_write));
     });
 }
@@ -1548,6 +1878,154 @@ mod tests {
         assert_eq!(guard(one, one + BLOCK), Some(vec![one / PAGE]));
         title_memory_remapped(filler, MANY_VIEWS * BLOCK);
         drop_views(section, &[one, two], BLOCK);
+    }
+
+    /// This thread's protection statistics since the last call: per change
+    /// (calls, blocks, failed, runs) and the others.
+    fn counted() -> (Vec<[u64; 4]>, [u64; stats::OTHERS]) {
+        let (change, other) = stats::mine();
+        let per = change
+            .iter()
+            .map(|c| [c[stats::CALLS], c[stats::BLOCKS], c[stats::FAILED], c[stats::RUNS]])
+            .collect();
+        (per, other)
+    }
+
+    /// The counts of one change, [calls, blocks, failed, runs].
+    fn of(counts: &(Vec<[u64; 4]>, [u64; stats::OTHERS]), change: Change) -> [u64; 4] {
+        counts.0[change as usize]
+    }
+
+    /// Every protection change of a check, a write through another view,
+    /// the check after it and a write told is counted under its cause, with
+    /// the runs its blocks make; nothing the guards do changes.
+    #[test]
+    fn protection_changes_are_counted_by_cause() {
+        const SIZE: usize = 2 * BLOCK;
+        let (section, guarded, other) = two_views(SIZE);
+        let pages = |block: usize| (guarded + block * BLOCK) / PAGE;
+        let _ = counted();
+
+        // The first check guards both blocks in one call, and the other
+        // view's two blocks one call each: one run.
+        assert_eq!(guard(guarded, guarded + SIZE), Some(vec![pages(0), pages(1)]));
+        let c = counted();
+        assert_eq!(of(&c, Change::Guard), [1, 2, 0, 0]);
+        assert_eq!(of(&c, Change::Alias), [2, 2, 0, 1]);
+        for change in [Change::GuardRetry, Change::OpenFault, Change::OpenWrite, Change::OpenAlias, Change::OpenMapped] {
+            assert_eq!(of(&c, change), [0; 4], "{change:?}");
+        }
+        assert_eq!([c.1[stats::CHECKS], c.1[stats::CHECK_CALLS], c.1[stats::CHECK_JOINED]], [1, 1, 1]);
+        assert_eq!(c.1[stats::WAITS], 1, "one wait for the lock by the check");
+
+        // Nothing written: no call.
+        assert_eq!(guard(guarded, guarded + SIZE), Some(Vec::new()));
+        let c = counted();
+        assert!(c.0.iter().all(|v| *v == [0; 4]));
+        assert_eq!(c.1[stats::CHECKS], 0);
+
+        // A write through the other view faults: that block is opened for
+        // the fault, the guarded view's block as another view of it.
+        // SAFETY: the second view, read-write once the handler has opened it.
+        unsafe { ((other + BLOCK + 8) as *mut u8).write_volatile(1) };
+        let c = counted();
+        assert_eq!(of(&c, Change::OpenFault), [1, 1, 0, 1]);
+        assert_eq!(of(&c, Change::OpenAlias), [1, 1, 0, 1]);
+        assert_eq!(c.1[stats::FAULTS], 1);
+        assert_eq!(c.1[stats::WAITS + 2], 1, "one wait for the lock by the handler");
+
+        // The next check reports the block and guards it again, at both
+        // views.
+        assert_eq!(guard(guarded, guarded + SIZE), Some(vec![pages(1)]));
+        let c = counted();
+        assert_eq!(of(&c, Change::Guard), [1, 1, 0, 0]);
+        assert_eq!(of(&c, Change::Alias), [1, 1, 0, 1]);
+
+        // A write told over the other view's two blocks opens both (one
+        // run) and their two blocks in the guarded view (one run).
+        writing(other, SIZE);
+        let c = counted();
+        assert_eq!(of(&c, Change::OpenWrite), [2, 2, 0, 1]);
+        assert_eq!(of(&c, Change::OpenAlias), [2, 2, 0, 1]);
+        assert_eq!(c.1[stats::WAITS + 4], 1, "one wait for the lock by the write told");
+        assert_eq!(guard(guarded, guarded + SIZE), Some(vec![pages(0), pages(1)]));
+        drop_views(section, &[guarded, other], SIZE);
+        let _ = counted();
+    }
+
+    /// Two runs guarded by one check with only guarded blocks between them
+    /// count as one call joined; time on a submitting thread is summed
+    /// apart, and only there.
+    #[test]
+    fn joinable_runs_and_submission_time_are_counted() {
+        const SIZE: usize = 5 * BLOCK;
+        let (section, guarded, other) = two_views(SIZE);
+        assert_eq!(guard(guarded, guarded + SIZE).map(|w| w.len()), Some(5));
+        // SAFETY: the guarded view, opened by the handler at each write.
+        unsafe {
+            ((guarded + 8) as *mut u8).write_volatile(1);
+            ((guarded + 3 * BLOCK + 8) as *mut u8).write_volatile(1);
+        }
+        let _ = counted();
+        stats::set_submitting(true);
+        assert_eq!(guard(guarded, guarded + SIZE).map(|w| w.len()), Some(2));
+        stats::set_submitting(false);
+        let (change, other_counts) = stats::mine();
+        assert_eq!(other_counts[stats::CHECK_CALLS], 2);
+        assert_eq!(other_counts[stats::CHECK_JOINED], 1, "blocks 1 and 2 between the runs are guarded");
+        for c in [Change::Guard, Change::Alias] {
+            assert_eq!(change[c as usize][stats::CALLS], 2, "{c:?}");
+            assert_eq!(change[c as usize][stats::US_SUBMITTING], change[c as usize][stats::US], "{c:?}");
+        }
+        // SAFETY: as above.
+        unsafe { ((guarded + 8) as *mut u8).write_volatile(2) };
+        let _ = counted();
+        assert_eq!(guard(guarded, guarded + SIZE).map(|w| w.len()), Some(1));
+        let (change, _) = stats::mine();
+        assert_eq!(change[Change::Guard as usize][stats::US_SUBMITTING], 0, "not in a submission");
+        drop_views(section, &[guarded, other], SIZE);
+        let _ = counted();
+    }
+
+    /// A run that cannot be guarded in one call (a block in it is not
+    /// committed) is guarded block by block: the failed calls are counted,
+    /// and the guards do as they did (the block is noted absent).
+    #[test]
+    fn failed_protections_are_counted() {
+        // SAFETY: a reservation of three blocks, the outer two committed.
+        let p = unsafe { VirtualAlloc(std::ptr::null(), 3 * BLOCK, MEM_RESERVE, PAGE_READWRITE) } as usize;
+        assert_ne!(p, 0);
+        for block in [0, 2] {
+            // SAFETY: inside our reservation.
+            let at = unsafe { VirtualAlloc((p + block * BLOCK) as *const _, BLOCK, MEM_COMMIT, PAGE_READWRITE) };
+            assert!(!at.is_null());
+        }
+        let first = p / BLOCK;
+        let _ = counted();
+        {
+            let mut g = guards();
+            protect_here(&mut g, first, first + 3);
+            assert!(g.protected.contains(&first) && g.protected.contains(&(first + 2)));
+            assert!(!g.protected.contains(&(first + 1)));
+            assert!(g.absent.contains(&(first + 1)), "the uncommitted block is noted absent");
+        }
+        let c = counted();
+        assert_eq!(of(&c, Change::Guard), [1, 3, 1, 0], "the run's call failed");
+        assert_eq!(of(&c, Change::GuardRetry), [3, 3, 1, 0], "block by block, the middle one failed");
+        // Reads still work, and a write to a guarded block is taken by the
+        // handler and lands.
+        // SAFETY: committed blocks of ours, read-only for now.
+        unsafe {
+            assert_eq!(((p + 8) as *const u8).read_volatile(), 0);
+            ((p + 2 * BLOCK + 8) as *mut u8).write_volatile(7);
+            assert_eq!(((p + 2 * BLOCK + 8) as *const u8).read_volatile(), 7);
+        }
+        let c = counted();
+        assert_eq!(of(&c, Change::OpenFault), [1, 1, 0, 1]);
+        title_memory_remapped(p, 3 * BLOCK);
+        // SAFETY: our reservation.
+        unsafe { VirtualFree(p as *mut _, 0, MEM_RELEASE) };
+        let _ = counted();
     }
 
     /// A write or mapping that runs past the end of the address space (a

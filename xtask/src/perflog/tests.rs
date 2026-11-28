@@ -188,6 +188,15 @@ fn synthetic(spec: &Spec) -> String {
              (memory not watched); 1.0 frame waits sleeping 0.0 ms (all threads); ranges of shaders that cannot store to buffers: 0 steps 0.0 MB left out"
             ),
         );
+        line(t, c, "guard protection changes per frame (VirtualProtect): 2800 calls 25.00 ms in all, 18.00 ms of it on a submitting thread \
+             in a submission; guarding after copies 420 calls over 900 blocks 5.00 ms (5.00 ms in submissions), 3 calls block \
+             by block after a failed run (1 failed); guarding other views 790 calls over 790 blocks in 120 runs 6.50 ms \
+             (6.50 ms in submissions), 0 failed; opening for faults 418 calls in 400 runs 3.00 ms; for writes told 100 calls \
+             in 20 runs 1.00 ms (0.20 ms in submissions); other views of opened blocks 1070 calls in 300 runs 9.00 ms; \
+             blocks of views mapped 2 calls in 1 runs 0.05 ms; 0.0 openings failed".into());
+        line(t, c, "guard waits per frame: 418 write faults in the handler taking 6.00 ms on the faulting threads, 0.80 ms of it waiting \
+             for the guard lock; 900 checks waited 0.40 ms for the guard lock, 100 writes told waited 0.10 ms; 300 checks \
+             guarded in 420 calls, 250 if runs with only guarded blocks between them were joined".into());
         line(t, c, "guards over several views of a page, since the start: 1 blocks guarded with their other views, 2 views opened by a write through another, 3 ranges opened because a view of them was mapped".into());
         line(t, c, "frame account per frame: after a present 1.0 ms until the first list call and 2.0 ms until the first submission; \
              3.0 ms from the last submission to the present call; lists reset in 0.5 ms; the process ran 400 ms user + 50 ms kernel on \
@@ -748,4 +757,28 @@ fn card_fetch_waits_are_split_by_thread() {
         s.markdown(false, 8)
             .contains("`card.extra_wait_ms` | ms | submit-path |")
     );
+}
+
+/// The guards' protection lines (`crate::watch::stats`) are read with their
+/// window, and the calls joined runs would need are derived.
+#[test]
+fn guard_protection_lines_are_read() {
+    let run = parse("synthetic.log", &synthetic(&Spec::default()));
+    assert!(run.unparsed.is_empty(), "{:?}", run.unparsed);
+    let w = &run.windows[0];
+    assert_eq!(w.get("protect.calls"), Some(2800.0));
+    assert_eq!(w.get("protect.submitting_ms"), Some(18.0));
+    assert_eq!(w.get("protect.alias_runs"), Some(120.0));
+    assert_eq!(w.get("protect.other_calls"), Some(1070.0));
+    assert_eq!(w.get("protect.open_failed"), Some(0.0));
+    assert_eq!(w.get("guard_waits.fault_lock_ms"), Some(0.8));
+    assert_eq!(w.get("guard_waits.check_joined"), Some(250.0));
+    assert_eq!(
+        w.get("protect.calls_if_joined"),
+        Some(250.0 + 3.0 + 120.0 + 400.0 + 20.0 + 300.0 + 1.0)
+    );
+    let s = summary_of(&synthetic(&Spec::default()), &Selection::default());
+    let md = s.markdown(false, 8);
+    assert!(md.contains("## Guard protections (VirtualProtect)"));
+    assert!(md.contains("`protect.submitting_ms` | ms | submit-path |"));
 }
