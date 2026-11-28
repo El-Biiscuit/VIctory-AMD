@@ -276,6 +276,27 @@ pub const ENTRIES: &[Entry] = &[
                   {fault_wait_other_ms} ms on other threads",
     },
     Entry {
+        id: "lock_kinds",
+        scope: Scope::Copy,
+        pattern: "lock time per frame by kind of other thread: recording threads GUARDS {rec_guards_wait_ms} \
+                  ms waiting {rec_guards_hold_ms} ms held, JOURNAL {rec_journal_wait_ms} ms waiting {rec_journal_hold_ms} ms \
+                  held, VIEWS {rec_views_wait_ms} ms waiting {rec_views_hold_ms} ms held; runtime workers GUARDS \
+                  {run_guards_wait_ms} ms waiting {run_guards_hold_ms} ms held, JOURNAL {run_journal_wait_ms} ms waiting \
+                  {run_journal_hold_ms} ms held, VIEWS {run_views_wait_ms} ms waiting {run_views_hold_ms} ms held; other title \
+                  threads GUARDS {tother_guards_wait_ms} ms waiting {tother_guards_hold_ms} ms held, JOURNAL \
+                  {tother_journal_wait_ms} ms waiting {tother_journal_hold_ms} ms held, VIEWS {tother_views_wait_ms} ms waiting \
+                  {tother_views_hold_ms} ms held; unclassified GUARDS {unc_guards_wait_ms} ms waiting {unc_guards_hold_ms} ms \
+                  held, JOURNAL {unc_journal_wait_ms} ms waiting {unc_journal_hold_ms} ms held, VIEWS {unc_views_wait_ms} ms \
+                  waiting {unc_views_hold_ms} ms held; write faults by recording threads {fault_rec_taken} taken \
+                  {fault_rec_wait_ms} ms waiting, runtime workers {fault_run_taken} taken {fault_run_wait_ms} ms waiting, other \
+                  title threads {fault_tother_taken} taken {fault_tother_wait_ms} ms waiting, unclassified {fault_unc_taken} \
+                  taken {fault_unc_wait_ms} ms waiting; writes told by recording threads {write_rec_taken} taken \
+                  {write_rec_wait_ms} ms waiting, runtime workers {write_run_taken} taken {write_run_wait_ms} ms waiting, other \
+                  title threads {write_tother_taken} taken {write_tother_wait_ms} ms waiting, unclassified {write_unc_taken} \
+                  taken {write_unc_wait_ms} ms waiting; since the last line {took_title_role} threads made their first list call \
+                  or submission, having waited {waited_before_ms} ms for GUARDS before it",
+    },
+    Entry {
         id: "whole",
         scope: Scope::Copy,
         pattern: "copied whole (memory not watched): {whole_ms} ms per frame in {ranges} ranges",
@@ -1445,6 +1466,264 @@ pub const META: &[Meta] = &[
         Lower,
     ),
     m(
+        "lock_kinds.rec_guards_wait_ms",
+        "GUARDS waiting, recording threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.rec_guards_hold_ms",
+        "GUARDS held, recording threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.rec_journal_wait_ms",
+        "JOURNAL waiting, recording threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.rec_journal_hold_ms",
+        "JOURNAL held, recording threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.rec_views_wait_ms",
+        "VIEWS waiting, recording threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.rec_views_hold_ms",
+        "VIEWS held, recording threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.run_guards_wait_ms",
+        "GUARDS waiting, runtime workers",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.run_guards_hold_ms",
+        "GUARDS held, runtime workers",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.run_journal_wait_ms",
+        "JOURNAL waiting, runtime workers",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.run_journal_hold_ms",
+        "JOURNAL held, runtime workers",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.run_views_wait_ms",
+        "VIEWS waiting, runtime workers",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.run_views_hold_ms",
+        "VIEWS held, runtime workers",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.tother_guards_wait_ms",
+        "GUARDS waiting, other title threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.tother_guards_hold_ms",
+        "GUARDS held, other title threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.tother_journal_wait_ms",
+        "JOURNAL waiting, other title threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.tother_journal_hold_ms",
+        "JOURNAL held, other title threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.tother_views_wait_ms",
+        "VIEWS waiting, other title threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.tother_views_hold_ms",
+        "VIEWS held, other title threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.unc_guards_wait_ms",
+        "GUARDS waiting, unclassified threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.unc_guards_hold_ms",
+        "GUARDS held, unclassified threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.unc_journal_wait_ms",
+        "JOURNAL waiting, unclassified threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.unc_journal_hold_ms",
+        "JOURNAL held, unclassified threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.unc_views_wait_ms",
+        "VIEWS waiting, unclassified threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.unc_views_hold_ms",
+        "VIEWS held, unclassified threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.fault_rec_taken",
+        "Write faults taking GUARDS, recording threads",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_kinds.fault_rec_wait_ms",
+        "Write faults waiting for GUARDS, recording threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.fault_run_taken",
+        "Write faults taking GUARDS, runtime workers",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_kinds.fault_run_wait_ms",
+        "Write faults waiting for GUARDS, runtime workers",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.fault_tother_taken",
+        "Write faults taking GUARDS, other title threads",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_kinds.fault_tother_wait_ms",
+        "Write faults waiting for GUARDS, other title threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.fault_unc_taken",
+        "Write faults taking GUARDS, unclassified threads",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_kinds.fault_unc_wait_ms",
+        "Write faults waiting for GUARDS, unclassified threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.write_rec_taken",
+        "Writes told taking GUARDS, recording threads",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_kinds.write_rec_wait_ms",
+        "Writes told waiting for GUARDS, recording threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.write_run_taken",
+        "Writes told taking GUARDS, runtime workers",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_kinds.write_run_wait_ms",
+        "Writes told waiting for GUARDS, runtime workers",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.write_tother_taken",
+        "Writes told taking GUARDS, other title threads",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_kinds.write_tother_wait_ms",
+        "Writes told waiting for GUARDS, other title threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.write_unc_taken",
+        "Writes told taking GUARDS, unclassified threads",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_kinds.write_unc_wait_ms",
+        "Writes told waiting for GUARDS, unclassified threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.took_title_role",
+        "Threads at their first list call or submission (since the last line)",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_kinds.waited_before_ms",
+        "Their GUARDS waits before it, counted under an earlier kind (since the last line)",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_kinds.guards_wait_gap_ms",
+        "Other threads' GUARDS waits not in the four kinds (rounding only)",
+        Volume,
+        Lower,
+    ),
+    m(
         "account.until_record_ms",
         "After a present, until the first list call",
         Wall,
@@ -1999,6 +2278,54 @@ pub const SECTIONS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Lock time by kind of other thread",
+        &[
+            "lock_kinds.rec_guards_wait_ms",
+            "lock_kinds.fault_rec_wait_ms",
+            "lock_kinds.write_rec_wait_ms",
+            "lock_kinds.tother_guards_wait_ms",
+            "lock_kinds.fault_tother_wait_ms",
+            "lock_kinds.write_tother_wait_ms",
+            "lock_kinds.run_guards_wait_ms",
+            "lock_kinds.fault_run_wait_ms",
+            "lock_kinds.write_run_wait_ms",
+            "lock_kinds.unc_guards_wait_ms",
+            "lock_kinds.fault_unc_wait_ms",
+            "lock_kinds.write_unc_wait_ms",
+            "lock_kinds.guards_wait_gap_ms",
+            "lock_kinds.took_title_role",
+            "lock_kinds.waited_before_ms",
+            "lock_kinds.rec_guards_hold_ms",
+            "lock_kinds.rec_journal_wait_ms",
+            "lock_kinds.rec_journal_hold_ms",
+            "lock_kinds.rec_views_wait_ms",
+            "lock_kinds.rec_views_hold_ms",
+            "lock_kinds.run_guards_hold_ms",
+            "lock_kinds.run_journal_wait_ms",
+            "lock_kinds.run_journal_hold_ms",
+            "lock_kinds.run_views_wait_ms",
+            "lock_kinds.run_views_hold_ms",
+            "lock_kinds.tother_guards_hold_ms",
+            "lock_kinds.tother_journal_wait_ms",
+            "lock_kinds.tother_journal_hold_ms",
+            "lock_kinds.tother_views_wait_ms",
+            "lock_kinds.tother_views_hold_ms",
+            "lock_kinds.unc_guards_hold_ms",
+            "lock_kinds.unc_journal_wait_ms",
+            "lock_kinds.unc_journal_hold_ms",
+            "lock_kinds.unc_views_wait_ms",
+            "lock_kinds.unc_views_hold_ms",
+            "lock_kinds.fault_rec_taken",
+            "lock_kinds.fault_run_taken",
+            "lock_kinds.fault_tother_taken",
+            "lock_kinds.fault_unc_taken",
+            "lock_kinds.write_rec_taken",
+            "lock_kinds.write_run_taken",
+            "lock_kinds.write_tother_taken",
+            "lock_kinds.write_unc_taken",
+        ],
+    ),
+    (
         "Synchronisation",
         &[
             "late.settles",
@@ -2121,6 +2448,7 @@ mod tests {
             "card.extra_wait_relay_ms",
             "card.extra_wait_sync_ms",
             "protect.calls_if_joined",
+            "lock_kinds.guards_wait_gap_ms",
         ];
         let mut known: Vec<String> = derived.iter().map(|s| (*s).to_owned()).collect();
         for e in ENTRIES {

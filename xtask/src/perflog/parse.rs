@@ -396,6 +396,21 @@ fn derive(run: &mut Run) {
             let joined: f64 = keys.iter().map(|k| s.values[*k]).sum();
             s.values.insert("protect.calls_if_joined".into(), joined);
         }
+        // The kinds of other thread must add up to "other threads": what
+        // is left is the rounding of the printed values.
+        let kinds = [
+            "lock_kinds.rec_guards_wait_ms",
+            "lock_kinds.run_guards_wait_ms",
+            "lock_kinds.tother_guards_wait_ms",
+            "lock_kinds.unc_guards_wait_ms",
+        ];
+        if let Some(other) = s.get("lock_roles.other_guards_wait_ms")
+            && kinds.iter().all(|k| s.values.contains_key(*k))
+        {
+            let parts: f64 = kinds.iter().map(|k| s.values[*k]).sum();
+            s.values
+                .insert("lock_kinds.guards_wait_gap_ms".into(), other - parts);
+        }
         if let (Some(checked), Some(unchanged)) =
             (s.get("copies.checked_mb"), s.get("copies.unchanged_mb"))
         {

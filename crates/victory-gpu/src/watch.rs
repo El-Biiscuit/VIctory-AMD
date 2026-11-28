@@ -2178,7 +2178,7 @@ mod tests {
     /// lock counts apart. What the guards do is unchanged.
     #[test]
     fn lock_takings_are_counted_by_site() {
-        use crate::lockstat::{HOLD_NS, MAX_HOLD_NS, Role, Site, TAKEN};
+        use crate::lockstat::{HOLD_NS, MAX_HOLD_NS, Site, TAKEN};
         const SIZE: usize = 2 * BLOCK;
         let (section, guarded, other) = two_views(SIZE);
         let _ = crate::lockstat::mine();
@@ -2190,8 +2190,10 @@ mod tests {
         assert!(lock_counts(&c, Site::ViewsUnderGuards)[TAKEN] >= 1);
         let check = lock_counts(&c, Site::GuardCheck);
         assert!(check[MAX_HOLD_NS] <= check[HOLD_NS]);
-        // On this test thread: neither a submission nor a title submitter.
-        assert_eq!(c[Site::GuardCheck as usize][Role::Other as usize][TAKEN], 1);
+        // On this test thread: neither a submission nor a title submitter
+        // (the test harness names its threads: a "runtime worker").
+        assert_eq!(c[Site::GuardCheck as usize][crate::lockstat::role(false) as usize][TAKEN], 1);
+        assert!(crate::lockstat::OTHER_ROLES.contains(&crate::lockstat::role(false)));
 
         // SAFETY: the other view, read-write once the handler has opened it.
         unsafe { ((other + 8) as *mut u8).write_volatile(5) };

@@ -17,8 +17,32 @@
 //!   render threads, whose stalls delay the next submission;
 //! * the relay (the thread named `victory-relay`), which publishes the copy
 //!   back that settles wait for;
-//! * any other thread (the title's workers, file and streaming threads,
-//!   texture refreshes).
+//! * a title recording thread: one that has made a list call (marked by
+//!   `copystat` at its first) and has not submitted;
+//! * a runtime worker: a thread the runtime started under a name
+//!   (`dstorage {i}`, `victory-wide-{i}`, `victory-pipelines-{i}`,
+//!   `texture copy queue`, `card accounting`, ...), except `title-main`;
+//! * another title thread: a thread without a runtime name (the title
+//!   starts its threads itself, nameless) or `title-main`, that has neither
+//!   made a list call nor submitted. The runtime's few nameless threads (the
+//!   input poller, the title's suspend routines, the `VICTORY_STACKS`
+//!   sampler) would count here too; none is expected to take these locks;
+//! * unclassified: a thread whose kind was not known when it took the lock,
+//!   which happens only in the write-fault handler (the thread name is not
+//!   looked up there) on a thread that had not taken a lock elsewhere nor
+//!   made a list call yet.
+//!
+//! The four last are the "other threads" of the first counts (PR 01B-0):
+//! their sums are logged as before.
+//!
+//! The kind is the thread's at each taking, not its last: a recording
+//! thread's takings before its first list call count under "another title
+//! thread" (or "unclassified" in the handler). Those GUARDS waits are
+//! added up per thread, and when the thread makes its first list call or
+//! submission, the number of such threads and their earlier waits are
+//! counted ([`TOOK_TITLE_ROLE`], [`WAITED_BEFORE_TITLE_ROLE_NS`]): a
+//! window where they are not zero has takings counted under an earlier
+//! kind.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Mutex, MutexGuard};
@@ -84,10 +108,21 @@ pub(crate) enum Role {
     Submitting = 0,
     TitleSubmitter,
     Relay,
-    Other,
+    /// A title thread that has made a list call and not submitted.
+    Recording,
+    /// A thread the runtime started under a name.
+    Runtime,
+    /// A thread without a runtime name (or `title-main`), neither
+    /// recording nor submitting.
+    TitleOther,
+    /// Not known when taken (the fault handler, before any lookup).
+    Unclassified,
 }
 
-pub(crate) const ROLES: usize = 4;
+pub(crate) const ROLES: usize = 7;
+
+/// The kinds that made up "other threads" before they were told apart.
+pub(crate) const OTHER_ROLES: [Role; 4] = [Role::Recording, Role::Runtime, Role::TitleOther, Role::Unclassified];
 
 /// Per site and role: times taken, nanoseconds waiting, nanoseconds held,
 /// longest wait and hold, waits over 100 µs, holds over 100 µs and over
@@ -119,8 +154,13 @@ thread_local! {
     static SUBMITTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// This thread has submitted (a title render thread).
     static SUBMITTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// 0 not known yet, 1 the relay, 2 another thread.
+    /// This thread has made a list call (a title recording thread).
+    static RECORDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 0 not known yet, 1 the relay, 2 a runtime worker, 3 a title thread.
     static NAMED: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// Nanoseconds this thread waited for `GUARDS` as another title thread
+    /// or unclassified, before its first list call or submission.
+    static BEFORE_TITLE_ROLE_NS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// `GUARDS` holds on this thread (for [`Site::ViewsUnderGuards`]).
     static GUARDS_HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
@@ -141,14 +181,40 @@ pub(crate) fn on() -> bool {
 /// The thread enters or leaves a submission (`copystat`).
 pub(crate) fn submission(inside: bool) {
     SUBMITTING.with(|s| s.set(inside));
-    if inside {
-        SUBMITTER.with(|s| s.set(true));
+    if inside && !SUBMITTER.with(|s| s.replace(true)) && !RECORDING.with(|r| r.get()) {
+        took_title_role();
+    }
+}
+
+/// The thread made a list call (`copystat`, at each: only the first
+/// changes anything).
+pub(crate) fn recording() {
+    if !RECORDING.with(|r| r.replace(true)) && !SUBMITTER.with(|s| s.get()) {
+        took_title_role();
+    }
+}
+
+/// The thread's first list call or submission: counts it and its earlier
+/// waits under another kind.
+fn took_title_role() {
+    let before = BEFORE_TITLE_ROLE_NS.with(|b| b.replace(0));
+    extra(TOOK_TITLE_ROLE, 1);
+    extra(WAITED_BEFORE_TITLE_ROLE_NS, before);
+}
+
+/// The kind of a thread by its name: the relay, a title thread (no name,
+/// or `title-main`), or a runtime worker.
+fn named(name: Option<&str>) -> u8 {
+    match name {
+        Some("victory-relay") => 1,
+        None | Some("title-main") => 3,
+        Some(_) => 2,
     }
 }
 
 /// The kind of this thread. In the fault handler (`in_handler`) the thread
 /// name is not looked up (`thread::current` may allocate on a thread the
-/// runtime did not start); a thread not known by then counts as other,
+/// runtime did not start); a thread not known by then is unclassified,
 /// and the relay never takes a fault (its writes are told).
 pub(crate) fn role(in_handler: bool) -> Role {
     if SUBMITTING.with(|s| s.get()) {
@@ -157,15 +223,22 @@ pub(crate) fn role(in_handler: bool) -> Role {
     if SUBMITTER.with(|s| s.get()) {
         return Role::TitleSubmitter;
     }
-    match NAMED.with(|n| n.get()) {
-        1 => Role::Relay,
-        2 => Role::Other,
-        _ if in_handler => Role::Other,
-        _ => {
-            let relay = std::thread::current().name() == Some("victory-relay");
-            NAMED.with(|n| n.set(if relay { 1 } else { 2 }));
-            if relay { Role::Relay } else { Role::Other }
+    if RECORDING.with(|r| r.get()) {
+        return Role::Recording;
+    }
+    let kind = match NAMED.with(|n| n.get()) {
+        0 if in_handler => return Role::Unclassified,
+        0 => {
+            let kind = named(std::thread::current().name());
+            NAMED.with(|n| n.set(kind));
+            kind
         }
+        kind => kind,
+    };
+    match kind {
+        1 => Role::Relay,
+        2 => Role::Runtime,
+        _ => Role::TitleOther,
     }
 }
 
@@ -249,6 +322,9 @@ impl<T> Drop for Held<'_, T> {
         }
         if site.lock() == Lock::Guards {
             GUARDS_HELD.with(|h| h.set(h.get().saturating_sub(1)));
+            if matches!(role, Role::TitleOther | Role::Unclassified) {
+                BEFORE_TITLE_ROLE_NS.with(|b| b.set(b.get() + self.wait_ns));
+            }
         }
     }
 }
@@ -272,12 +348,12 @@ pub(crate) fn take<T>(site: Site, lock: &Mutex<T>, time_wait: bool) -> Held<'_, 
     };
     if !on() {
         if !time_wait {
-            return wrap(plain(lock), Role::Other, None, 0, 0, None);
+            return wrap(plain(lock), Role::Unclassified, None, 0, 0, None);
         }
         let asked = Instant::now();
         let guard = plain(lock);
         let waited_us = Some(asked.elapsed().as_micros() as u64);
-        return wrap(guard, Role::Other, None, 0, 0, waited_us);
+        return wrap(guard, Role::Unclassified, None, 0, 0, waited_us);
     }
     let role = self::role(site == Site::GuardFault);
     let which = site.lock() as usize;
@@ -327,32 +403,60 @@ pub(crate) fn site_total(c: &Counts, site: Site, field: usize) -> u64 {
     }
 }
 
-/// Sums of one field over the sites of a lock, for one role.
-#[cfg(feature = "diagnostics")]
-pub(crate) fn lock_role_total(c: &Counts, lock: Lock, role: Role, field: usize) -> u64 {
+/// Sums of one field over the sites of a lock, for some roles.
+#[cfg(any(test, feature = "diagnostics"))]
+pub(crate) fn lock_role_total(c: &Counts, lock: Lock, roles: &[Role], field: usize) -> u64 {
     (0..SITES)
         .filter(|&s| ALL_SITES[s].lock() == lock)
-        .map(|s| c[s][role as usize][field])
+        .flat_map(|s| roles.iter().map(move |&r| c[s][r as usize][field]))
         .sum()
+}
+
+/// Sums of one field of a site over some roles.
+#[cfg(any(test, feature = "diagnostics"))]
+pub(crate) fn site_role_total(c: &Counts, site: Site, roles: &[Role], field: usize) -> u64 {
+    roles.iter().map(|&r| c[site as usize][r as usize][field]).sum()
 }
 
 /// Beside the locks: nanoseconds a guard check spent asking Windows
 /// whether its range is view memory (`VirtualQuery`, before taking
 /// `GUARDS`), nanoseconds it spent asking about uncommitted blocks while
-/// holding `GUARDS`, and write faults that found their block open already
-/// (another thread opened it while this one waited).
+/// holding `GUARDS`, write faults that found their block open already
+/// (another thread opened it while this one waited), threads that made
+/// their first list call or submission, and the nanoseconds those threads
+/// had waited for `GUARDS` before it (counted then under another title
+/// thread or unclassified).
 pub(crate) const IS_VIEW_NS: usize = 0;
 pub(crate) const UNCOMMITTED_NS: usize = 1;
 pub(crate) const FAULTS_FOUND_OPEN: usize = 2;
-pub(crate) const EXTRAS: usize = 3;
+pub(crate) const TOOK_TITLE_ROLE: usize = 3;
+pub(crate) const WAITED_BEFORE_TITLE_ROLE_NS: usize = 4;
+pub(crate) const EXTRAS: usize = 5;
 
 static EXTRA: [AtomicU64; EXTRAS] = [const { AtomicU64::new(0) }; EXTRAS];
+
+#[cfg(test)]
+thread_local! {
+    static MINE_EXTRA: std::cell::Cell<[u64; EXTRAS]> = const { std::cell::Cell::new([0; EXTRAS]) };
+}
 
 /// Adds `n` to one of the counts beside the locks, if counting is on.
 pub(crate) fn extra(which: usize, n: u64) {
     if on() {
         EXTRA[which].fetch_add(n, Relaxed);
+        #[cfg(test)]
+        MINE_EXTRA.with(|m| {
+            let mut v = m.get();
+            v[which] += n;
+            m.set(v);
+        });
     }
+}
+
+/// This thread's counts beside the locks since the last call, reset (tests).
+#[cfg(test)]
+pub(crate) fn mine_extra() -> [u64; EXTRAS] {
+    MINE_EXTRA.with(|m| m.replace([0; EXTRAS]))
 }
 
 /// The counts beside the locks since the last call, reset.
@@ -404,7 +508,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let c = mine();
-        let r = c[Site::GuardWrite as usize][Role::Other as usize];
+        let r = c[Site::GuardWrite as usize][role(false) as usize];
         assert_eq!(r[TAKEN], 1);
         assert!(r[HOLD_NS] >= 2_000_000, "{r:?}");
         assert_eq!(r[MAX_HOLD_NS], r[HOLD_NS]);
@@ -429,7 +533,104 @@ mod tests {
         })
         .join()
         .unwrap();
-        assert_eq!(roles, (Role::Other, Role::Submitting, Role::TitleSubmitter));
+        // A nameless thread (as the title's are) is another title thread.
+        assert_eq!(roles, (Role::TitleOther, Role::Submitting, Role::TitleSubmitter));
+    }
+
+    /// A thread that has made a list call is a recording thread until it
+    /// submits; a submitter that makes list calls stays a submitter.
+    #[test]
+    fn list_calls_make_recording_threads() {
+        let roles = std::thread::spawn(|| {
+            let before = role(false);
+            recording();
+            let recording_now = (role(false), role(true));
+            submission(true);
+            let inside = role(false);
+            submission(false);
+            recording();
+            (before, recording_now, inside, role(false))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(roles, (Role::TitleOther, (Role::Recording, Role::Recording), Role::Submitting, Role::TitleSubmitter));
+    }
+
+    /// Kinds by thread name: the runtime's named threads are workers;
+    /// `title-main` and nameless threads are title threads; a thread first
+    /// seen in the fault handler is unclassified until known elsewhere.
+    #[test]
+    fn thread_kinds_follow_names() {
+        let kind = |name: Option<&str>| {
+            let b = std::thread::Builder::new();
+            let b = match name {
+                Some(n) => b.name(n.into()),
+                None => b,
+            };
+            b.spawn(|| (role(true), role(false), role(true))).unwrap().join().unwrap()
+        };
+        let u = Role::Unclassified;
+        assert_eq!(kind(Some("dstorage 0")), (u, Role::Runtime, Role::Runtime));
+        assert_eq!(kind(Some("victory-wide-3")), (u, Role::Runtime, Role::Runtime));
+        assert_eq!(kind(Some("title-main")), (u, Role::TitleOther, Role::TitleOther));
+        assert_eq!(kind(None), (u, Role::TitleOther, Role::TitleOther));
+        assert_eq!(kind(Some("victory-relay")), (u, Role::Relay, Role::Relay));
+        for r in OTHER_ROLES {
+            assert!(!matches!(r, Role::Submitting | Role::TitleSubmitter | Role::Relay));
+        }
+    }
+
+    /// A thread's GUARDS waits before its first list call count under the
+    /// kind it had then; at that call the thread and those waits are
+    /// counted, once.
+    #[test]
+    fn waits_before_the_first_list_call_are_counted_apart() {
+        static L: Mutex<()> = Mutex::new(());
+        let held = take(Site::JournalOther, &L, false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _ = (mine(), mine_extra());
+            tx.send(()).unwrap();
+            // A fault first: unclassified, and it waits for the holder.
+            drop(take(Site::GuardFault, &L, false));
+            let before = mine();
+            recording();
+            recording();
+            let flushed = mine_extra();
+            drop(take(Site::GuardFault, &L, false));
+            (before, flushed, mine(), mine_extra())
+        });
+        rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(held);
+        let (before, flushed, after, later) = thread.join().unwrap();
+        let fault = Site::GuardFault as usize;
+        let waited = before[fault][Role::Unclassified as usize][WAIT_NS];
+        assert!(waited >= 10_000_000, "{waited}");
+        assert_eq!(flushed[TOOK_TITLE_ROLE], 1);
+        assert_eq!(flushed[WAITED_BEFORE_TITLE_ROLE_NS], waited);
+        assert_eq!(after[fault][Role::Recording as usize][TAKEN], 1);
+        assert_eq!(later, [0; EXTRAS]);
+    }
+
+    /// The kinds told apart add up to the "other threads" of before.
+    #[test]
+    fn other_kinds_add_up_to_other_threads() {
+        let mut c: Counts = [[[0; FIELDS]; ROLES]; SITES];
+        for (i, s) in c.iter_mut().enumerate() {
+            for (j, r) in s.iter_mut().enumerate() {
+                r[WAIT_NS] = (i * 10 + j) as u64;
+            }
+        }
+        let parts: u64 = OTHER_ROLES.iter().map(|&r| lock_role_total(&c, Lock::Guards, &[r], WAIT_NS)).sum();
+        assert_eq!(parts, lock_role_total(&c, Lock::Guards, &OTHER_ROLES, WAIT_NS));
+        let all = [Role::Submitting, Role::TitleSubmitter, Role::Relay];
+        let total: u64 = (0..6).flat_map(|s| c[s].iter().map(|r| r[WAIT_NS])).sum();
+        assert_eq!(lock_role_total(&c, Lock::Guards, &all, WAIT_NS) + parts, total);
+        assert_eq!(
+            site_role_total(&c, Site::GuardFault, &OTHER_ROLES, WAIT_NS),
+            (3..7).map(|j| c[2][j][WAIT_NS]).sum::<u64>()
+        );
     }
 
     #[test]
@@ -441,7 +642,7 @@ mod tests {
             .join()
             .unwrap();
         // Not looked up in the handler before it was known.
-        assert_eq!(r, (Role::Other, Role::Relay, Role::Relay));
+        assert_eq!(r, (Role::Unclassified, Role::Relay, Role::Relay));
     }
 
     /// A thread waiting while another holds the lock: its wait, the queue
@@ -460,11 +661,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         drop(held);
         let theirs = waiter.join().unwrap();
-        let w = theirs[Site::JournalOther as usize][Role::Other as usize];
+        let w = theirs[Site::JournalOther as usize][Role::TitleOther as usize];
         assert_eq!(w[TAKEN], 1);
         assert!(w[WAIT_NS] >= 10_000_000, "{w:?}");
         assert_eq!(w[WAITS_OVER_100US], 1);
-        let mine = mine()[Site::JournalOther as usize][Role::Other as usize];
+        let mine = mine()[Site::JournalOther as usize][role(false) as usize];
         assert!(mine[HOLD_NS] >= 10_000_000);
     }
 

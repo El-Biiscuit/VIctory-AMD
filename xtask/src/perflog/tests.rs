@@ -246,6 +246,16 @@ fn synthetic(spec: &Spec) -> String {
              write faults waited {title_fault_wait:.2} ms on title submitting threads and 15.00 ms on other threads"
             ),
         );
+        line(t, c, "lock time per frame by kind of other thread: recording threads GUARDS 4.00 ms waiting 0.10 ms held, \
+             JOURNAL 0.10 ms waiting 0.10 ms held, VIEWS 0.10 ms waiting 0.10 ms held; runtime workers GUARDS 1.50 ms \
+             waiting 0.10 ms held, JOURNAL 0.10 ms waiting 0.10 ms held, VIEWS 0.10 ms waiting 0.10 ms held; other title \
+             threads GUARDS 3.25 ms waiting 0.10 ms held, JOURNAL 0.10 ms waiting 0.10 ms held, VIEWS 0.10 ms waiting 0.10 \
+             ms held; unclassified GUARDS 1.25 ms waiting 0.10 ms held, JOURNAL 0.10 ms waiting 0.10 ms held, VIEWS 0.10 ms \
+             waiting 0.10 ms held; write faults by recording threads 120 taken 2.50 ms waiting, runtime workers 0 taken \
+             0.10 ms waiting, other title threads 0 taken 0.10 ms waiting, unclassified 0 taken 0.10 ms waiting; writes \
+             told by recording threads 0 taken 0.10 ms waiting, runtime workers 0 taken 0.10 ms waiting, other title \
+             threads 0 taken 2.75 ms waiting, unclassified 0 taken 0.10 ms waiting; since the last line 2 threads made \
+             their first list call or submission, having waited 0.75 ms for GUARDS before it".into());
         line(t, c, "guards over several views of a page, since the start: 1 blocks guarded with their other views, 2 views opened by a write through another, 3 ranges opened because a view of them was mapped".into());
         line(
             t,
@@ -872,6 +882,33 @@ fn lock_lines_are_read() {
         "{md}"
     );
     assert!(md.contains("`lock_roles.sub_guards_wait_ms` | ms | submit-path |"));
+}
+
+/// The kinds of other thread (PR 01B-0b) are read, and what they leave of
+/// "other threads" is derived: the rounding only.
+#[test]
+fn other_thread_kinds_are_read() {
+    let run = parse("synthetic.log", &synthetic(&Spec::default()));
+    assert!(run.unparsed.is_empty(), "{:?}", run.unparsed);
+    let w = &run.windows[0];
+    assert_eq!(w.get("lock_kinds.rec_guards_wait_ms"), Some(4.0));
+    assert_eq!(w.get("lock_kinds.tother_guards_wait_ms"), Some(3.25));
+    assert_eq!(w.get("lock_kinds.unc_guards_wait_ms"), Some(1.25));
+    assert_eq!(w.get("lock_kinds.fault_rec_taken"), Some(120.0));
+    assert_eq!(w.get("lock_kinds.fault_rec_wait_ms"), Some(2.5));
+    assert_eq!(w.get("lock_kinds.write_tother_wait_ms"), Some(2.75));
+    assert_eq!(w.get("lock_kinds.took_title_role"), Some(2.0));
+    assert_eq!(w.get("lock_kinds.waited_before_ms"), Some(0.75));
+    // other threads 10.00 = 4.00 + 1.50 + 3.25 + 1.25.
+    let gap = w.get("lock_kinds.guards_wait_gap_ms").unwrap();
+    assert!(gap.abs() < 1e-9, "{gap}");
+    let s = summary_of(&synthetic(&Spec::default()), &Selection::default());
+    let md = s.markdown(false, 8);
+    assert!(md.contains("## Lock time by kind of other thread"), "{md}");
+    assert!(
+        md.contains("`lock_kinds.fault_rec_wait_ms` | ms | thread-sum |"),
+        "{md}"
+    );
 }
 
 fn bursty() -> Spec {
