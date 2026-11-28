@@ -947,8 +947,9 @@ fn log_protections(frames: f64) {
 /// holds as they were, not per frame.
 fn log_locks(frames: f64) {
     use crate::lockstat::{
-        FAULTS_FOUND_OPEN, HOLD_NS, HOLDS_OVER_1MS, HOLDS_OVER_100US, IS_VIEW_NS, Lock, MAX_HOLD_NS, MAX_WAIT_NS, QUEUED,
-        Role, Site, TAKEN, UNCOMMITTED_NS, WAIT_NS, WAITS_OVER_100US, lock_role_total, site_total,
+        FAULTS_FOUND_OPEN, HOLD_NS, HOLDS_OVER_1MS, HOLDS_OVER_100US, IS_VIEW_NS, Lock, MAX_HOLD_NS, MAX_WAIT_NS,
+        OTHER_ROLES, QUEUED, Role, Site, TAKEN, TOOK_TITLE_ROLE, UNCOMMITTED_NS, WAIT_NS, WAITED_BEFORE_TITLE_ROLE_NS,
+        WAITS_OVER_100US, lock_role_total, site_role_total, site_total,
     };
     if !crate::lockstat::on() {
         return;
@@ -1097,30 +1098,30 @@ fn log_locks(frames: f64) {
          relay GUARDS {:.2} ms waiting {:.2} ms held, JOURNAL {:.2} ms waiting {:.2} ms held, VIEWS {:.2} ms waiting \
          {:.2} ms held; other threads GUARDS {:.2} ms waiting {:.2} ms held, JOURNAL {:.2} ms waiting {:.2} ms held, \
          VIEWS {:.2} ms waiting {:.2} ms held",
-        ms(lock_role_total(&c, Lock::Guards, Role::Submitting, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Guards, Role::Submitting, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Journal, Role::Submitting, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Journal, Role::Submitting, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Views, Role::Submitting, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Views, Role::Submitting, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Guards, Role::TitleSubmitter, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Guards, Role::TitleSubmitter, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Journal, Role::TitleSubmitter, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Journal, Role::TitleSubmitter, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Views, Role::TitleSubmitter, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Views, Role::TitleSubmitter, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Guards, Role::Relay, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Guards, Role::Relay, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Journal, Role::Relay, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Journal, Role::Relay, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Views, Role::Relay, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Views, Role::Relay, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Guards, Role::Other, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Guards, Role::Other, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Journal, Role::Other, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Journal, Role::Other, HOLD_NS)),
-        ms(lock_role_total(&c, Lock::Views, Role::Other, WAIT_NS)),
-        ms(lock_role_total(&c, Lock::Views, Role::Other, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Submitting], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Submitting], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Submitting], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Submitting], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Submitting], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Submitting], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::TitleSubmitter], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::TitleSubmitter], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::TitleSubmitter], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::TitleSubmitter], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::TitleSubmitter], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::TitleSubmitter], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Relay], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Relay], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Relay], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Relay], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Relay], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Relay], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &OTHER_ROLES, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &OTHER_ROLES, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &OTHER_ROLES, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &OTHER_ROLES, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, &OTHER_ROLES, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, &OTHER_ROLES, HOLD_NS)),
     );
     tracing::info!(
         "guard lock around checks and faults per frame: {:.2} ms asking whether ranges are views before taking the \
@@ -1130,7 +1131,62 @@ fn log_locks(frames: f64) {
         ms(extra[UNCOMMITTED_NS]),
         per(extra[FAULTS_FOUND_OPEN]),
         ms(c[Site::GuardFault as usize][Role::TitleSubmitter as usize][WAIT_NS]),
-        ms(c[Site::GuardFault as usize][Role::Submitting as usize][WAIT_NS] + c[Site::GuardFault as usize][Role::Relay as usize][WAIT_NS] + c[Site::GuardFault as usize][Role::Other as usize][WAIT_NS]),
+        ms(c[Site::GuardFault as usize][Role::Submitting as usize][WAIT_NS] + c[Site::GuardFault as usize][Role::Relay as usize][WAIT_NS] + site_role_total(&c, Site::GuardFault, &OTHER_ROLES, WAIT_NS)),
+    );
+    tracing::info!(
+        "lock time per frame by kind of other thread: recording threads GUARDS {:.2} ms waiting {:.2} ms \
+         held, JOURNAL {:.2} ms waiting {:.2} ms held, VIEWS {:.2} ms waiting {:.2} ms held; runtime workers GUARDS \
+         {:.2} ms waiting {:.2} ms held, JOURNAL {:.2} ms waiting {:.2} ms held, VIEWS {:.2} ms waiting {:.2} ms held; \
+         other title threads GUARDS {:.2} ms waiting {:.2} ms held, JOURNAL {:.2} ms waiting {:.2} ms held, VIEWS {:.2} \
+         ms waiting {:.2} ms held; unclassified GUARDS {:.2} ms waiting {:.2} ms held, JOURNAL {:.2} ms waiting {:.2} \
+         ms held, VIEWS {:.2} ms waiting {:.2} ms held; write faults by recording threads {:.0} taken {:.2} ms waiting, \
+         runtime workers {:.0} taken {:.2} ms waiting, other title threads {:.0} taken {:.2} ms waiting, unclassified \
+         {:.0} taken {:.2} ms waiting; writes told by recording threads {:.0} taken {:.2} ms waiting, runtime workers \
+         {:.0} taken {:.2} ms waiting, other title threads {:.0} taken {:.2} ms waiting, unclassified {:.0} taken {:.2} \
+         ms waiting; since the last line {} threads made their first list call or submission, having waited {:.2} ms \
+         for GUARDS before it",
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Recording], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Recording], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Recording], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Recording], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Recording], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Recording], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Runtime], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Runtime], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Runtime], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Runtime], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Runtime], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Runtime], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::TitleOther], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::TitleOther], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::TitleOther], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::TitleOther], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::TitleOther], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::TitleOther], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Unclassified], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, &[Role::Unclassified], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Unclassified], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, &[Role::Unclassified], HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Unclassified], WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, &[Role::Unclassified], HOLD_NS)),
+        per(c[Site::GuardFault as usize][Role::Recording as usize][TAKEN]),
+        ms(c[Site::GuardFault as usize][Role::Recording as usize][WAIT_NS]),
+        per(c[Site::GuardFault as usize][Role::Runtime as usize][TAKEN]),
+        ms(c[Site::GuardFault as usize][Role::Runtime as usize][WAIT_NS]),
+        per(c[Site::GuardFault as usize][Role::TitleOther as usize][TAKEN]),
+        ms(c[Site::GuardFault as usize][Role::TitleOther as usize][WAIT_NS]),
+        per(c[Site::GuardFault as usize][Role::Unclassified as usize][TAKEN]),
+        ms(c[Site::GuardFault as usize][Role::Unclassified as usize][WAIT_NS]),
+        per(c[Site::GuardWrite as usize][Role::Recording as usize][TAKEN]),
+        ms(c[Site::GuardWrite as usize][Role::Recording as usize][WAIT_NS]),
+        per(c[Site::GuardWrite as usize][Role::Runtime as usize][TAKEN]),
+        ms(c[Site::GuardWrite as usize][Role::Runtime as usize][WAIT_NS]),
+        per(c[Site::GuardWrite as usize][Role::TitleOther as usize][TAKEN]),
+        ms(c[Site::GuardWrite as usize][Role::TitleOther as usize][WAIT_NS]),
+        per(c[Site::GuardWrite as usize][Role::Unclassified as usize][TAKEN]),
+        ms(c[Site::GuardWrite as usize][Role::Unclassified as usize][WAIT_NS]),
+        extra[TOOK_TITLE_ROLE],
+        max_ms(extra[WAITED_BEFORE_TITLE_ROLE_NS]),
     );
 }
 
@@ -1227,6 +1283,7 @@ fn submitter(all: &mut Vec<(u32, Submitter)>, id: u32) -> &mut Submitter {
 /// A list call on this thread that began at `started` has returned.
 pub(crate) fn recorded(started: std::time::Instant) {
     let ns = started.elapsed().as_nanos() as u64;
+    crate::lockstat::recording();
     add(C::RecordCalls, 1);
     add(C::RecordNs, ns);
     if !RECORDED_SINCE.load(Relaxed) && !RECORDED_SINCE.swap(true, Relaxed) {

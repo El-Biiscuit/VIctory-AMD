@@ -143,7 +143,7 @@ For each cause, the line gives:
 
 The counting changes nothing in what the guards do. It costs two clock readings per call. `VICTORY_PROTECT_STATS=0` leaves it out. The Windows tests in `watch.rs` (`protection_changes_are_counted_by_cause`, `joinable_runs_and_submission_time_are_counted`, `failed_protections_are_counted`) check the counts against real views written through two aliases. They run with `cargo test -p victory-gpu --lib` on Windows and need no graphics card.
 
-## Lock waits and holds (`lock_guards.*`, `lock_jv.*`, `lock_roles.*`, `lock_extra.*`)
+## Lock waits and holds (`lock_guards.*`, `lock_jv.*`, `lock_roles.*`, `lock_kinds.*`, `lock_extra.*`)
 
 Diagnostics builds count, over the copystat window, how long three locks are waited for and held:
 - `GUARDS`, the guard state of view memory (`watch.rs`);
@@ -177,7 +177,28 @@ Times are per frame. Longest waits and holds are for the whole window, not per f
 | In submissions | `sub_*` | The submission lock is held: the frame waits for this time. |
 | Title submitting threads outside their submissions | `title_*` | The title's render threads. A stall here delays the next submission. This is the title's critical path. |
 | The relay | `relay_*` | The thread named `victory-relay`. Settles wait for it. |
-| Other threads | `other_*` | The title's workers, file and streaming threads, texture refreshes. |
+| Other threads | `other_*` | Every other thread: the sum of the four kinds of `lock_kinds.*` below. |
+
+`lock_kinds.*` splits the "other threads" into four kinds (line `lock time per frame by kind of other thread`):
+
+| Kind | Keys | How the runtime knows it |
+| --- | --- | --- |
+| Title recording threads | `rec_*`, `fault_rec_*`, `write_rec_*` | The thread has made a list call (marked at its first one, in `copystat::recorded`) and has never submitted. Certain: only the title's code makes list calls. |
+| Runtime workers | `run_*`, `fault_run_*`, `write_run_*` | The thread has a name the runtime gave it (`dstorage {i}`, `victory-wide-{i}`, `victory-pipelines-{i}`, `texture copy queue`, `card accounting`, `victory-late-wait`, `victory-memory-map`, …), other than `title-main`. Certain: the title's threads have no Rust name. |
+| Other title threads | `tother_*`, `fault_tother_*`, `write_tother_*` | No runtime name (the title creates its threads itself, nameless), or `title-main`, and neither a list call nor a submission so far: the title's workers, file and streaming threads. Three nameless runtime threads would land here too (the input poller, the thread running the title's suspend routines, the `VICTORY_STACKS` sampler); none of them is expected to take these locks. |
+| Unclassified | `unc_*`, `fault_unc_*`, `write_unc_*` | The kind was not known when the lock was taken. That only happens in the write-fault handler, which does not look up thread names (the lookup can allocate on a thread the runtime did not start). A thread lands here when its first lock taking is a fault, before any list call, submission or other lock taking. Title threads that only ever fault (they write guarded memory and never take another lock) stay here. |
+
+For each kind the line gives:
+- `GUARDS`, `JOURNAL` and `VIEWS` time waiting and held (`<kind>_guards_wait_ms`, …);
+- for write faults and for writes told, the `GUARDS` takings and the wait (`fault_<kind>_taken`, `fault_<kind>_wait_ms`, `write_<kind>_taken`, `write_<kind>_wait_ms`).
+
+**The kind is taken at each taking.** A thread's kind can change once: a nameless thread becomes a recording thread at its first list call, or a title submitter at its first submission. Its takings before that are counted under the kind it had then ("other title thread", or "unclassified" in the fault handler). To see how much that moves:
+- each thread adds up its `GUARDS` waits counted as "other title thread" or "unclassified";
+- at its first list call or submission, `lock_kinds.took_title_role` counts the thread, and `lock_kinds.waited_before_ms` adds those waits.
+
+These two are totals since the previous line, not per frame. In steady play they should be 0: the recording threads start with the first frame. A non-zero value marks the windows where part of "other title threads" or "unclassified" belongs to a recording or submitting thread.
+
+**Check that the split adds up.** `lock_kinds.guards_wait_gap_ms` is derived: `lock_roles.other_guards_wait_ms` minus the four `<kind>_guards_wait_ms`. It should only be the rounding of the printed values (a few hundredths of a millisecond).
 
 `lock_extra.*` gives:
 - the time checks spend asking Windows whether a range is view memory, before taking `GUARDS`;
@@ -190,10 +211,12 @@ Times are per frame. Longest waits and holds are for the whole window, not per f
 - **Hold** is time it kept others out.
 - Long waits on one site with long holds on another site show who blocks whom.
 - `title_*` and `sub_*` waits are the ones on the critical path. `other_*` waits may run beside the frame.
+- Among them, `lock_kinds.rec_*` waits are on threads whose lists the next submission needs. `tother_*` and `run_*` waits only delay the frame if the title waits for those threads.
 
 **Cost and switch.**
 - The counting allocates, sorts and logs nothing while a lock is held or in the fault handler.
 - Inside a lock it costs two clock readings. All the counts are added after the lock is released.
+- The kind of thread is a few thread-local flags, read before the lock is taken. The name is looked up once per thread, outside the fault handler. A list call adds one thread-local read.
 - `copystat` formats them at its own line.
 - Measured outside Windows, in a Linux virtual machine: about 125 ns per take and release, most of it the clock. The test `lockstat::tests::counting_costs_little` prints the figure on any machine with `-- --nocapture`.
 - `VICTORY_LOCK_STATS=0` turns this counting off. `VICTORY_PROTECT_STATS=0` turns off the `protect.*` counting. The two switches are independent.
@@ -226,7 +249,7 @@ A correlation does not say which way the cause runs. Read it together with the t
 | `card.*` | `host copies in the card's memory` | `host.rs`, `Meter::frame` |
 | `d3d.<queue>.*`, `joins.*`, `texrefresh.*`, `fills.*`, `card_passes.*`, `slow_watch.*` | per-tick lines | `host.rs`, `Meter::frame` |
 | `copies.*`, `recording.*`, `account.*`, `whole.*`, `card_wait.*`, `heap.*`, `barrier_waits.*` | copystat lines | `copystat.rs`, `log` |
-| `lock_guards.*`, `lock_jv.*`, `lock_roles.*`, `lock_extra.*` | `GUARDS lock per frame`, `JOURNAL and VIEWS locks per frame`, `lock time per frame by thread`, `guard lock around checks and faults per frame` | `copystat.rs`, `log_locks` (counted in `lockstat.rs`) |
+| `lock_guards.*`, `lock_jv.*`, `lock_roles.*`, `lock_kinds.*`, `lock_extra.*` | `GUARDS lock per frame`, `JOURNAL and VIEWS locks per frame`, `lock time per frame by thread`, `lock time per frame by kind of other thread`, `guard lock around checks and faults per frame` | `copystat.rs`, `log_locks` (counted in `lockstat.rs`) |
 | `protect.*`, `guard_waits.*` | `guard protection changes per frame (VirtualProtect)`, `guard waits per frame` | `copystat.rs`, `log_protections` (counted in `watch.rs`, `stats`) |
 | `vram.*`, `memory.*`, `tex_memory.*`, `let_go.*`, `staging_pool.*`, `budget_change.*` | gauges | `host.rs`, `copystat.rs`, `log_memory` |
 
