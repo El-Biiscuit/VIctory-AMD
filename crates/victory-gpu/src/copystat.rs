@@ -875,6 +875,73 @@ fn log_memory() {
     );
 }
 
+/// Logs the guards' protection changes and the waits around them
+/// (`crate::watch::stats`), per frame since the last line.
+fn log_protections(frames: f64) {
+    use crate::watch::Change::{Alias, Guard, GuardRetry, OpenAlias, OpenFault, OpenMapped, OpenWrite};
+    use crate::watch::stats::{
+        BLOCKS, CALLS, CHECK_CALLS, CHECK_JOINED, CHECKS, FAILED, FAULT_US, FAULTS, RUNS, US, US_SUBMITTING, WAITS,
+    };
+    let (change, other) = crate::watch::stats::take();
+    let n = |c: crate::watch::Change, f: usize| change[c as usize][f] as f64 / frames;
+    let ms = |c: crate::watch::Change, f: usize| change[c as usize][f] as f64 / 1e3 / frames;
+    let all = |f: usize| change.iter().map(|c| c[f]).sum::<u64>() as f64 / frames;
+    let failed_opens: u64 = [OpenFault, OpenWrite, OpenAlias, OpenMapped].iter().map(|&c| change[c as usize][FAILED]).sum();
+    tracing::info!(
+        "guard protection changes per frame (VirtualProtect): {:.0} calls {:.2} ms in all, {:.2} ms of it on a submitting thread \
+         in a submission; guarding after copies {:.0} calls over {:.0} blocks {:.2} ms ({:.2} ms in submissions), {:.0} calls block \
+         by block after a failed run ({:.0} failed); guarding other views {:.0} calls over {:.0} blocks in {:.0} runs {:.2} ms \
+         ({:.2} ms in submissions), {:.0} failed; opening for faults {:.0} calls in {:.0} runs {:.2} ms; for writes told {:.0} calls \
+         in {:.0} runs {:.2} ms ({:.2} ms in submissions); other views of opened blocks {:.0} calls in {:.0} runs {:.2} ms; \
+         blocks of views mapped {:.0} calls in {:.0} runs {:.2} ms; {:.1} openings failed",
+        all(CALLS),
+        all(US) / 1e3,
+        all(US_SUBMITTING) / 1e3,
+        n(Guard, CALLS),
+        n(Guard, BLOCKS),
+        ms(Guard, US),
+        ms(Guard, US_SUBMITTING),
+        n(GuardRetry, CALLS),
+        n(GuardRetry, FAILED),
+        n(Alias, CALLS),
+        n(Alias, BLOCKS),
+        n(Alias, RUNS),
+        ms(Alias, US),
+        ms(Alias, US_SUBMITTING),
+        n(Alias, FAILED),
+        n(OpenFault, CALLS),
+        n(OpenFault, RUNS),
+        ms(OpenFault, US),
+        n(OpenWrite, CALLS),
+        n(OpenWrite, RUNS),
+        ms(OpenWrite, US),
+        ms(OpenWrite, US_SUBMITTING),
+        n(OpenAlias, CALLS),
+        n(OpenAlias, RUNS),
+        ms(OpenAlias, US),
+        n(OpenMapped, CALLS),
+        n(OpenMapped, RUNS),
+        ms(OpenMapped, US),
+        failed_opens as f64 / frames,
+    );
+    let o = |f: usize| other[f] as f64 / frames;
+    tracing::info!(
+        "guard waits per frame: {:.0} write faults in the handler taking {:.2} ms on the faulting threads, {:.2} ms of it waiting \
+         for the guard lock; {:.0} checks waited {:.2} ms for the guard lock, {:.0} writes told waited {:.2} ms; {:.0} checks \
+         guarded in {:.0} calls, {:.0} if runs with only guarded blocks between them were joined",
+        o(FAULTS),
+        o(FAULT_US) / 1e3,
+        o(WAITS + 3) / 1e3,
+        o(WAITS),
+        o(WAITS + 1) / 1e3,
+        o(WAITS + 4),
+        o(WAITS + 5) / 1e3,
+        o(CHECKS),
+        o(CHECK_CALLS),
+        o(CHECK_JOINED),
+    );
+}
+
 /// Microseconds since the first call.
 fn now_us() -> u64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -994,6 +1061,7 @@ pub(crate) fn recorded(started: std::time::Instant) {
 /// A submission is called on this thread (before it waits for the
 /// submission lock).
 pub(crate) fn submission_begins() {
+    crate::watch::stats::set_submitting(true);
     let now = now_us();
     if !SUBMITTED_SINCE.load(Relaxed) && !SUBMITTED_SINCE.swap(true, Relaxed) {
         add(C::UntilSubmitUs, now.saturating_sub(PRESENTED_AT.load(Relaxed)));
@@ -1014,6 +1082,7 @@ pub(crate) fn submission_begins() {
 /// The submission returns; it waited `lock` microseconds for the
 /// submission lock.
 pub(crate) fn submission_ends(lock: u64) {
+    crate::watch::stats::set_submitting(false);
     let now = now_us();
     SUBMITTED_AT.store(now, Relaxed);
     let (user, kernel) = thread_times();
@@ -1129,6 +1198,7 @@ pub(crate) fn log(frames: f64) {
         c[C::GpuWritesLeftOut as usize],
         mb(c[C::GpuWritesLeftOutBytes as usize]),
     );
+    log_protections(frames);
     let [together, written, mapped] =
         [0, 1, 2].map(|n| crate::watch::ALIASES[n].load(std::sync::atomic::Ordering::Relaxed));
     tracing::info!(

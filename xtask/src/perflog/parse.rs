@@ -380,6 +380,22 @@ fn derive(run: &mut Run) {
         }
     }
     for s in &mut run.windows {
+        // What the guards' calls would be if each contiguous run were one
+        // call: checks' runs joined across guarded blocks, the block-by-
+        // block retries as they are, and per-block kinds by their runs.
+        let keys = [
+            "guard_waits.check_joined",
+            "protect.retry_calls",
+            "protect.alias_runs",
+            "protect.fault_runs",
+            "protect.write_runs",
+            "protect.other_runs",
+            "protect.mapped_runs",
+        ];
+        if keys.iter().all(|k| s.values.contains_key(*k)) {
+            let joined: f64 = keys.iter().map(|k| s.values[*k]).sum();
+            s.values.insert("protect.calls_if_joined".into(), joined);
+        }
         if let (Some(checked), Some(unchanged)) =
             (s.get("copies.checked_mb"), s.get("copies.unchanged_mb"))
         {

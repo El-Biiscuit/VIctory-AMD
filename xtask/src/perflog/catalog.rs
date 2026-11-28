@@ -197,6 +197,23 @@ pub const ENTRIES: &[Entry] = &[
                   ran alone",
     },
     Entry {
+        id: "protect",
+        scope: Scope::Copy,
+        pattern: "guard protection changes per frame (VirtualProtect): {calls} calls {all_ms} ms in all, {submitting_ms} ms of it on a submitting thread \
+                  in a submission; guarding after copies {guard_calls} calls over {guard_blocks} blocks {guard_ms} ms ({guard_submitting_ms} ms in submissions), {retry_calls} calls block \
+                  by block after a failed run ({retry_failed} failed); guarding other views {alias_calls} calls over {alias_blocks} blocks in {alias_runs} runs {alias_ms} ms \
+                  ({alias_submitting_ms} ms in submissions), {alias_failed} failed; opening for faults {fault_calls} calls in {fault_runs} runs {fault_ms} ms; for writes told {write_calls} calls \
+                  in {write_runs} runs {write_ms} ms ({write_submitting_ms} ms in submissions); other views of opened blocks {other_calls} calls in {other_runs} runs {other_ms} ms; \
+                  blocks of views mapped {mapped_calls} calls in {mapped_runs} runs {mapped_ms} ms; {open_failed} openings failed",
+    },
+    Entry {
+        id: "guard_waits",
+        scope: Scope::Copy,
+        pattern: "guard waits per frame: {faults} write faults in the handler taking {fault_ms} ms on the faulting threads, {fault_lock_ms} ms of it waiting \
+                  for the guard lock; {checks_waiting} checks waited {check_lock_ms} ms for the guard lock, {writes_waiting} writes told waited {write_lock_ms} ms; {checks} checks \
+                  guarded in {check_calls} calls, {check_joined} if runs with only guarded blocks between them were joined",
+    },
+    Entry {
         id: "whole",
         scope: Scope::Copy,
         pattern: "copied whole (memory not watched): {whole_ms} ms per frame in {ranges} ranges",
@@ -628,6 +645,176 @@ pub const META: &[Meta] = &[
         "Texture uploads recorded",
         Volume,
         Neither,
+    ),
+    // Guard protections (`crate::watch::stats`, copystat window).
+    m(
+        "protect.calls",
+        "VirtualProtect calls by the guards (all threads)",
+        Volume,
+        Lower,
+    ),
+    m(
+        "protect.calls_if_joined",
+        "  if contiguous runs were one call each (derived)",
+        Volume,
+        Lower,
+    ),
+    m(
+        "protect.all_ms",
+        "VirtualProtect time, all threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "protect.submitting_ms",
+        "  of it on a submitting thread in a submission",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "protect.guard_calls",
+        "Guarding after copies: calls",
+        Volume,
+        Lower,
+    ),
+    m(
+        "protect.guard_blocks",
+        "Guarding after copies: blocks",
+        Volume,
+        Neither,
+    ),
+    m(
+        "protect.guard_ms",
+        "Guarding after copies: time",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "protect.retry_calls",
+        "Guarding block by block after a failed run: calls",
+        Volume,
+        Lower,
+    ),
+    m(
+        "protect.alias_calls",
+        "Guarding other views: calls (one per block)",
+        Volume,
+        Lower,
+    ),
+    m(
+        "protect.alias_runs",
+        "Guarding other views: contiguous runs",
+        Volume,
+        Neither,
+    ),
+    m(
+        "protect.alias_ms",
+        "Guarding other views: time",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "protect.fault_calls",
+        "Opening for write faults: calls",
+        Volume,
+        Lower,
+    ),
+    m(
+        "protect.fault_ms",
+        "Opening for write faults: time (title threads)",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "protect.write_calls",
+        "Opening for writes told: calls",
+        Volume,
+        Lower,
+    ),
+    m(
+        "protect.write_ms",
+        "Opening for writes told: time",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "protect.other_calls",
+        "Opening other views of opened blocks: calls",
+        Volume,
+        Lower,
+    ),
+    m(
+        "protect.other_runs",
+        "Opening other views of opened blocks: contiguous runs",
+        Volume,
+        Neither,
+    ),
+    m(
+        "protect.other_ms",
+        "Opening other views of opened blocks: time",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "protect.mapped_calls",
+        "Opening blocks of views mapped: calls",
+        Volume,
+        Lower,
+    ),
+    m("protect.open_failed", "Failed openings", Volume, Lower),
+    m(
+        "protect.retry_failed",
+        "Failed block-by-block guards",
+        Volume,
+        Neither,
+    ),
+    m(
+        "protect.alias_failed",
+        "Failed guards of other views",
+        Volume,
+        Lower,
+    ),
+    m(
+        "guard_waits.faults",
+        "Write faults taken by the guard handler",
+        Volume,
+        Lower,
+    ),
+    m(
+        "guard_waits.fault_ms",
+        "Time in the handler (title threads)",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "guard_waits.fault_lock_ms",
+        "  of it waiting for the guard lock",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "guard_waits.check_lock_ms",
+        "Checks waiting for the guard lock",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "guard_waits.write_lock_ms",
+        "Writes told waiting for the guard lock",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "guard_waits.check_calls",
+        "Calls of checks that guarded",
+        Volume,
+        Lower,
+    ),
+    m(
+        "guard_waits.check_joined",
+        "  if runs across guarded blocks were joined",
+        Volume,
+        Lower,
     ),
     m(
         "account.until_record_ms",
@@ -1084,6 +1271,39 @@ pub const SECTIONS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Guard protections (VirtualProtect)",
+        &[
+            "protect.calls",
+            "protect.calls_if_joined",
+            "protect.all_ms",
+            "protect.submitting_ms",
+            "protect.guard_calls",
+            "protect.guard_blocks",
+            "protect.guard_ms",
+            "protect.retry_calls",
+            "protect.alias_calls",
+            "protect.alias_runs",
+            "protect.alias_ms",
+            "protect.fault_calls",
+            "protect.fault_ms",
+            "protect.write_calls",
+            "protect.write_ms",
+            "protect.other_calls",
+            "protect.other_runs",
+            "protect.other_ms",
+            "protect.mapped_calls",
+            "protect.open_failed",
+            "protect.alias_failed",
+            "guard_waits.faults",
+            "guard_waits.fault_ms",
+            "guard_waits.fault_lock_ms",
+            "guard_waits.check_lock_ms",
+            "guard_waits.write_lock_ms",
+            "guard_waits.check_calls",
+            "guard_waits.check_joined",
+        ],
+    ),
+    (
         "Synchronisation",
         &[
             "late.settles",
@@ -1205,6 +1425,7 @@ mod tests {
             "vram.local_used_pct",
             "card.extra_wait_relay_ms",
             "card.extra_wait_sync_ms",
+            "protect.calls_if_joined",
         ];
         let mut known: Vec<String> = derived.iter().map(|s| (*s).to_owned()).collect();
         for e in ENTRIES {

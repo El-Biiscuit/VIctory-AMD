@@ -117,6 +117,32 @@ Two consequences for the reference measurement (201.8 ms per frame; 147.1 ms pre
 - **The cost ranking** lists durations per frame (medians) with their parent aggregate and timing class. "Largest parts" takes the three deepest entries that have data. A thread-sum or concurrent entry is not on the frame's critical path as such, and the ranking says so.
 - **Verdicts** in comparisons compare medians against a noise band. They are indications. A gain counts only once the responsible tester has confirmed it in the game on the target machine.
 
+## Guard protections (`protect.*`, `guard_waits.*`)
+
+Title memory that the kernel cannot write-watch (views of physical pages) is guarded instead. After a copy takes a block, the block is made read-only with `VirtualProtect`. The first write faults into the handler in `crates/victory-gpu/src/watch.rs`, which opens the block again. Diagnostics builds count every one of these calls by cause, over the copystat window:
+
+| Cause | Keys | Where it runs |
+| --- | --- | --- |
+| Guarding blocks a copy has just taken (one call per run), then block by block if the run's call failed | `protect.guard_*`, `protect.retry_*` | the thread checking a copy, usually the submitting thread |
+| Guarding the other views of those pages (one call per block) | `protect.alias_*` | same |
+| Opening for a write that faulted | `protect.fault_*` | the title's faulting thread |
+| Opening for a write told (`writing`: the runtime's kernel reads, our writes into title memory) | `protect.write_*` | the title's thread, or ours |
+| Opening the other views of an opened block | `protect.other_*` | with the opening above |
+| Opening blocks of which a new view was mapped | `protect.mapped_*` | the runtime's mapping thread |
+
+For each cause, the line gives:
+- calls, blocks, failed calls and time, all summed over threads;
+- the time spent on a thread inside a submission (`*_submitting_ms`). That thread holds the submission lock, so the frame waits for this part.
+- for the causes that make one call per block, the runs of contiguous blocks. A run is what one call could cover.
+
+`protect.calls_if_joined` adds up these runs, plus the runs of each check joined across blocks that are already guarded (`guard_waits.check_joined`). It is an upper bound on what joining calls could save: it does not say that joining is always allowed.
+
+`guard_waits.*` gives:
+- the write faults the handler took and their total time on the faulting threads;
+- the waits for the guard lock: by the handler (the title's thread stands still), by checks, and by writes told.
+
+The counting changes nothing in what the guards do. It costs two clock readings per call. `VICTORY_PROTECT_STATS=0` leaves it out. The Windows tests in `watch.rs` (`protection_changes_are_counted_by_cause`, `joinable_runs_and_submission_time_are_counted`, `failed_protections_are_counted`) check the counts against real views written through two aliases. They run with `cargo test -p victory-gpu --lib` on Windows and need no graphics card.
+
 ## Main keys
 
 | Prefix | Line in the runtime | Source |
@@ -129,6 +155,7 @@ Two consequences for the reference measurement (201.8 ms per frame; 147.1 ms pre
 | `card.*` | `host copies in the card's memory` | `host.rs`, `Meter::frame` |
 | `d3d.<queue>.*`, `joins.*`, `texrefresh.*`, `fills.*`, `card_passes.*`, `slow_watch.*` | per-tick lines | `host.rs`, `Meter::frame` |
 | `copies.*`, `recording.*`, `account.*`, `whole.*`, `card_wait.*`, `heap.*`, `barrier_waits.*` | copystat lines | `copystat.rs`, `log` |
+| `protect.*`, `guard_waits.*` | `guard protection changes per frame (VirtualProtect)`, `guard waits per frame` | `copystat.rs`, `log_protections` (counted in `watch.rs`, `stats`) |
 | `vram.*`, `memory.*`, `tex_memory.*`, `let_go.*`, `staging_pool.*`, `budget_change.*` | gauges | `host.rs`, `copystat.rs`, `log_memory` |
 
 ## Maintenance
