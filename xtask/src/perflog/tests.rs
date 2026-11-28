@@ -23,6 +23,8 @@ struct Spec {
     card_wait_ms: f64,
     relay_fetch_ms: f64,
     relay: bool,
+    /// Copystat windows written at tick `i` that are a streaming burst.
+    burst: fn(usize) -> bool,
     presents: bool,
     ansi: bool,
     crlf: bool,
@@ -42,6 +44,7 @@ impl Default for Spec {
             card_wait_ms: 2.0,
             relay_fetch_ms: 2.5,
             relay: true,
+            burst: |_| false,
             presents: false,
             ansi: false,
             crlf: false,
@@ -197,12 +200,65 @@ fn synthetic(spec: &Spec) -> String {
         line(t, c, "guard waits per frame: 418 write faults in the handler taking 6.00 ms on the faulting threads, 0.80 ms of it waiting \
              for the guard lock; 900 checks waited 0.40 ms for the guard lock, 100 writes told waited 0.10 ms; 300 checks \
              guarded in 420 calls, 250 if runs with only guarded blocks between them were joined".into());
+        let burst = (spec.burst)(i);
+        let (write_wait, title_fault_wait, found_open) = if burst {
+            (103.81, 12.0, 16.0)
+        } else {
+            (1.33, 6.0, 16.0)
+        };
+        line(
+            t,
+            c,
+            format!(
+                "GUARDS lock per frame: checks 2070 taken, 0.14 ms waiting (longest 0.05 ms, 0.0 over 0.1 ms), 18.00 ms held \
+             (longest 2.50 ms, 40.0 over 0.1 ms, 3.00 over 1 ms); looks before checks 2070 taken, 0.01 ms waiting (longest \
+             0.01 ms, 0.0 over 0.1 ms), 0.40 ms held (longest 0.01 ms, 0.0 over 0.1 ms, 0.00 over 1 ms); write faults 356 \
+             taken, 23.08 ms waiting (longest 4.10 ms, 60.0 over 0.1 ms), 5.50 ms held (longest 0.30 ms, 2.0 over 0.1 ms, \
+             0.00 over 1 ms); writes told 579 taken, {write_wait:.2} ms waiting (longest 9.00 ms, 3.0 over 0.1 ms), 1.10 ms \
+             held (longest 0.20 ms, 0.0 over 0.1 ms, 0.00 over 1 ms); views mapped 2 taken, 0.00 ms waiting (longest 0.00 \
+             ms, 0.0 over 0.1 ms), 0.02 ms held (longest 0.01 ms, 0.0 over 0.1 ms, 0.00 over 1 ms); remaps 5 taken, 0.01 ms \
+             waiting (longest 0.01 ms, 0.0 over 0.1 ms), 0.05 ms held (longest 0.02 ms, 0.0 over 0.1 ms, 0.00 over 1 ms); \
+             0.85 threads already waiting on average when taken, 6 at most"
+            ),
+        );
+        line(t, c, "JOURNAL and VIEWS locks per frame: JOURNAL by write-watch askings and guard checks 1500 taken, 0.20 ms waiting \
+             (longest 0.10 ms, 0.0 over 0.1 ms), 30.00 ms held (longest 3.00 ms, 50.0 over 0.1 ms, 5.00 over 1 ms); JOURNAL \
+             by looks at askings ahead 1500 taken, 0.20 ms waiting (longest 0.10 ms, 0.0 over 0.1 ms), 30.00 ms held \
+             (longest 3.00 ms, 50.0 over 0.1 ms, 5.00 over 1 ms); JOURNAL by askings ahead 1500 taken, 0.20 ms waiting \
+             (longest 0.10 ms, 0.0 over 0.1 ms), 30.00 ms held (longest 3.00 ms, 50.0 over 0.1 ms, 5.00 over 1 ms); JOURNAL \
+             otherwise 1500 taken, 0.20 ms waiting (longest 0.10 ms, 0.0 over 0.1 ms), 30.00 ms held (longest 3.00 ms, 50.0 \
+             over 0.1 ms, 5.00 over 1 ms); VIEWS with GUARDS held 1500 taken, 0.20 ms waiting (longest 0.10 ms, 0.0 over \
+             0.1 ms), 30.00 ms held (longest 3.00 ms, 50.0 over 0.1 ms, 5.00 over 1 ms); VIEWS otherwise 1500 taken, 0.20 \
+             ms waiting (longest 0.10 ms, 0.0 over 0.1 ms), 30.00 ms held (longest 3.00 ms, 50.0 over 0.1 ms, 5.00 over 1 \
+             ms); JOURNAL 0.10 threads already waiting on average when taken, 2 at most; VIEWS 0.02, 1 at most".into());
+        line(t, c, "lock time per frame by thread: in submissions GUARDS 1.00 ms waiting 21.00 ms held, JOURNAL 2.00 ms waiting \
+             22.00 ms held, VIEWS 3.00 ms waiting 23.00 ms held; title submitting threads outside submissions GUARDS 4.00 \
+             ms waiting 24.00 ms held, JOURNAL 5.00 ms waiting 25.00 ms held, VIEWS 6.00 ms waiting 26.00 ms held; the \
+             relay GUARDS 7.00 ms waiting 27.00 ms held, JOURNAL 8.00 ms waiting 28.00 ms held, VIEWS 9.00 ms waiting 29.00 \
+             ms held; other threads GUARDS 10.00 ms waiting 30.00 ms held, JOURNAL 11.00 ms waiting 31.00 ms held, VIEWS \
+             12.00 ms waiting 32.00 ms held".into());
+        line(
+            t,
+            c,
+            format!(
+                "guard lock around checks and faults per frame: 3.20 ms asking whether ranges are views before taking the lock, \
+             0.40 ms asking about uncommitted blocks holding it; {found_open:.1} write faults found their block open already; \
+             write faults waited {title_fault_wait:.2} ms on title submitting threads and 15.00 ms on other threads"
+            ),
+        );
         line(t, c, "guards over several views of a page, since the start: 1 blocks guarded with their other views, 2 views opened by a write through another, 3 ranges opened because a view of them was mapped".into());
-        line(t, c, "frame account per frame: after a present 1.0 ms until the first list call and 2.0 ms until the first submission; \
+        line(
+            t,
+            c,
+            format!(
+                "frame account per frame: after a present 1.0 ms until the first list call and 2.0 ms until the first submission; \
              3.0 ms from the last submission to the present call; lists reset in 0.5 ms; the process ran 400 ms user + 50 ms kernel on \
-             all threads; what shaders wrote: 60.0 ms finding 30 pieces that differ, 5.0 ms putting them back; texture uploads: 10 recorded, \
+             all threads; what shaders wrote: 60.0 ms finding 30 pieces that differ, 5.0 ms putting them back; texture uploads: {} recorded, \
              90 left out; 0.0 held submissions run at the present with their waits not met; waits for memory values: 100 looks 0.3 ms; \
-             40 host lists made 0.4 ms; 0 parts of held submissions ran alone that the next part could have run with".into());
+             40 host lists made 0.4 ms; 0 parts of held submissions ran alone that the next part could have run with",
+                if burst { 684 } else { 10 }
+            ),
+        );
         line(
             t,
             c,
@@ -781,4 +837,110 @@ fn guard_protection_lines_are_read() {
     let md = s.markdown(false, 8);
     assert!(md.contains("## Guard protections (VirtualProtect)"));
     assert!(md.contains("`protect.submitting_ms` | ms | submit-path |"));
+}
+
+/// The lock lines (`crate::lockstat`) are read with their window: holds
+/// and waits by site, the queue, the time by kind of thread, and the
+/// counts around checks and faults.
+#[test]
+fn lock_lines_are_read() {
+    let run = parse("synthetic.log", &synthetic(&Spec::default()));
+    assert!(run.unparsed.is_empty(), "{:?}", run.unparsed);
+    let w = &run.windows[0];
+    assert_eq!(w.get("lock_guards.check_hold_ms"), Some(18.0));
+    assert_eq!(w.get("lock_guards.check_holds_vlong"), Some(3.0));
+    assert_eq!(w.get("lock_guards.fault_wait_ms"), Some(23.08));
+    assert_eq!(w.get("lock_guards.fault_wait_max_ms"), Some(4.1));
+    assert_eq!(w.get("lock_guards.write_wait_ms"), Some(1.33));
+    assert_eq!(w.get("lock_guards.queue_mean"), Some(0.85));
+    assert_eq!(w.get("lock_guards.queue_max"), Some(6.0));
+    assert_eq!(w.get("lock_jv.vg_hold_ms"), Some(30.0));
+    assert_eq!(w.get("lock_jv.v_queue_max"), Some(1.0));
+    // In submissions, title submitting threads, the relay, other threads;
+    // GUARDS, JOURNAL, VIEWS each: waits 1..12, holds 21..32 in order.
+    assert_eq!(w.get("lock_roles.sub_guards_wait_ms"), Some(1.0));
+    assert_eq!(w.get("lock_roles.title_guards_wait_ms"), Some(4.0));
+    assert_eq!(w.get("lock_roles.title_guards_hold_ms"), Some(24.0));
+    assert_eq!(w.get("lock_roles.other_views_hold_ms"), Some(32.0));
+    assert_eq!(w.get("lock_extra.fault_wait_title_ms"), Some(6.0));
+    assert_eq!(w.get("lock_extra.faults_found_open"), Some(16.0));
+    let s = summary_of(&synthetic(&Spec::default()), &Selection::default());
+    let md = s.markdown(false, 8);
+    assert!(md.contains("## Lock contention (GUARDS, JOURNAL, VIEWS)"));
+    assert!(
+        md.contains("`lock_extra.fault_wait_title_ms` | ms | title-critical |"),
+        "{md}"
+    );
+    assert!(md.contains("`lock_roles.sub_guards_wait_ms` | ms | submit-path |"));
+}
+
+fn bursty() -> Spec {
+    Spec {
+        ticks: 60,
+        frame_ms: |i| {
+            if (10..20).contains(&i) {
+                700.0 + i as f64
+            } else {
+                200.0 + (i % 3) as f64
+            }
+        },
+        burst: |i| (10..20).contains(&i),
+        ..Spec::default()
+    }
+}
+
+/// Windows with many texture uploads are bursts, the rest steady; ticks go
+/// with the window that covers them; each side has its spread, and the
+/// window metrics are correlated with the frame time.
+#[test]
+fn steady_periods_and_bursts_are_split() {
+    use super::parse::split;
+    use super::report::{Regimes, correlations};
+    let run = parse("synthetic.log", &synthetic(&bursty()));
+    let sel = Selection::default();
+    let all = select(&run, &sel);
+    let (steady, bursts) = split(&all, "account.tex_uploads", 100.0);
+    // Windows at ticks 4, 9, ..., 59: those of 14 and 19 cover the burst.
+    assert_eq!((steady.windows.len(), bursts.windows.len()), (10, 2));
+    assert_eq!(bursts.ticks.len(), 10);
+    assert!(
+        bursts
+            .ticks
+            .iter()
+            .all(|t| t.get("frame.ms").is_none_or(|ms| ms >= 700.0))
+    );
+    assert_eq!(steady.ticks.len() + bursts.ticks.len(), 60);
+    let (a, b) = (
+        Summary::build(&sel, &[steady]),
+        Summary::build(&sel, &[bursts]),
+    );
+    assert_eq!(a.metrics["lock_guards.write_wait_ms"].median, 1.33);
+    assert_eq!(b.metrics["lock_guards.write_wait_ms"].median, 103.81);
+    assert_eq!(a.metrics["lock_guards.write_wait_ms"].iqr(), 0.0);
+    let corr = correlations(&[select(&run, &sel)], 8);
+    let r = |k: &str| corr.iter().find(|c| c.0 == k).map(|c| c.1);
+    assert!(r("lock_guards.write_wait_ms").unwrap() > 0.9, "{corr:?}");
+    // No spread: no correlation.
+    assert_eq!(r("lock_guards.check_hold_ms"), None);
+    let regimes = Regimes {
+        steady: &a,
+        bursts: &b,
+        key: "account.tex_uploads".into(),
+        min: 100.0,
+        correlations: corr,
+    };
+    let md = regimes.markdown(false);
+    assert!(md.contains("Copystat windows with `account.tex_uploads` >= 100 are bursts"));
+    assert!(
+        md.contains("| Writes told waiting for the guard lock |")
+            || md.contains("`lock_guards.write_wait_ms`")
+    );
+    assert!(md.contains("## Correlation with the frame time, per copystat window"));
+    let json = regimes.json().to_string();
+    assert!(
+        json.contains("\"correlations_with_frame_ms\"")
+            && json.contains("\"iqr\"")
+            && json.contains("\"cv\"")
+    );
+    assert!(regimes.csv().lines().count() > 10);
 }

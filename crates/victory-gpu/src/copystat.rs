@@ -942,6 +942,198 @@ fn log_protections(frames: f64) {
     );
 }
 
+/// Logs the waits and holds of the memory-tracking locks
+/// (`crate::lockstat`), per frame since the last line; longest waits and
+/// holds as they were, not per frame.
+fn log_locks(frames: f64) {
+    use crate::lockstat::{
+        FAULTS_FOUND_OPEN, HOLD_NS, HOLDS_OVER_1MS, HOLDS_OVER_100US, IS_VIEW_NS, Lock, MAX_HOLD_NS, MAX_WAIT_NS, QUEUED,
+        Role, Site, TAKEN, UNCOMMITTED_NS, WAIT_NS, WAITS_OVER_100US, lock_role_total, site_total,
+    };
+    if !crate::lockstat::on() {
+        return;
+    }
+    let (c, most) = crate::lockstat::take_counts();
+    let extra = crate::lockstat::take_extra();
+    let per = |n: u64| n as f64 / frames;
+    let ms = |ns: u64| ns as f64 / 1e6 / frames;
+    let max_ms = |ns: u64| ns as f64 / 1e6;
+    let queue = |lock: Lock| {
+        let sites = crate::lockstat::ALL_SITES.iter().filter(|s| s.lock() == lock);
+        let (queued, taken) = sites.fold((0, 0), |(q, t), &s| (q + site_total(&c, s, QUEUED), t + site_total(&c, s, TAKEN)));
+        if taken == 0 { 0.0 } else { queued as f64 / taken as f64 }
+    };
+    tracing::info!(
+        "GUARDS lock per frame: checks {:.0} taken, {:.2} ms waiting (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} ms \
+         held (longest {:.2} ms, {:.1} over 0.1 ms, {:.2} over 1 ms); looks before checks {:.0} taken, {:.2} ms waiting \
+         (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} ms held (longest {:.2} ms, {:.1} over 0.1 ms, {:.2} over 1 ms); \
+         write faults {:.0} taken, {:.2} ms waiting (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} ms held (longest {:.2} \
+         ms, {:.1} over 0.1 ms, {:.2} over 1 ms); writes told {:.0} taken, {:.2} ms waiting (longest {:.2} ms, {:.1} \
+         over 0.1 ms), {:.2} ms held (longest {:.2} ms, {:.1} over 0.1 ms, {:.2} over 1 ms); views mapped {:.0} taken, \
+         {:.2} ms waiting (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} ms held (longest {:.2} ms, {:.1} over 0.1 ms, \
+         {:.2} over 1 ms); remaps {:.0} taken, {:.2} ms waiting (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} ms held \
+         (longest {:.2} ms, {:.1} over 0.1 ms, {:.2} over 1 ms); {:.2} threads already waiting on average when taken, \
+         {} at most",
+        per(site_total(&c, Site::GuardCheck, TAKEN)),
+        ms(site_total(&c, Site::GuardCheck, WAIT_NS)),
+        max_ms(site_total(&c, Site::GuardCheck, MAX_WAIT_NS)),
+        per(site_total(&c, Site::GuardCheck, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::GuardCheck, HOLD_NS)),
+        max_ms(site_total(&c, Site::GuardCheck, MAX_HOLD_NS)),
+        per(site_total(&c, Site::GuardCheck, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::GuardCheck, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::GuardKnown, TAKEN)),
+        ms(site_total(&c, Site::GuardKnown, WAIT_NS)),
+        max_ms(site_total(&c, Site::GuardKnown, MAX_WAIT_NS)),
+        per(site_total(&c, Site::GuardKnown, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::GuardKnown, HOLD_NS)),
+        max_ms(site_total(&c, Site::GuardKnown, MAX_HOLD_NS)),
+        per(site_total(&c, Site::GuardKnown, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::GuardKnown, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::GuardFault, TAKEN)),
+        ms(site_total(&c, Site::GuardFault, WAIT_NS)),
+        max_ms(site_total(&c, Site::GuardFault, MAX_WAIT_NS)),
+        per(site_total(&c, Site::GuardFault, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::GuardFault, HOLD_NS)),
+        max_ms(site_total(&c, Site::GuardFault, MAX_HOLD_NS)),
+        per(site_total(&c, Site::GuardFault, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::GuardFault, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::GuardWrite, TAKEN)),
+        ms(site_total(&c, Site::GuardWrite, WAIT_NS)),
+        max_ms(site_total(&c, Site::GuardWrite, MAX_WAIT_NS)),
+        per(site_total(&c, Site::GuardWrite, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::GuardWrite, HOLD_NS)),
+        max_ms(site_total(&c, Site::GuardWrite, MAX_HOLD_NS)),
+        per(site_total(&c, Site::GuardWrite, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::GuardWrite, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::GuardMapped, TAKEN)),
+        ms(site_total(&c, Site::GuardMapped, WAIT_NS)),
+        max_ms(site_total(&c, Site::GuardMapped, MAX_WAIT_NS)),
+        per(site_total(&c, Site::GuardMapped, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::GuardMapped, HOLD_NS)),
+        max_ms(site_total(&c, Site::GuardMapped, MAX_HOLD_NS)),
+        per(site_total(&c, Site::GuardMapped, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::GuardMapped, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::GuardRemapped, TAKEN)),
+        ms(site_total(&c, Site::GuardRemapped, WAIT_NS)),
+        max_ms(site_total(&c, Site::GuardRemapped, MAX_WAIT_NS)),
+        per(site_total(&c, Site::GuardRemapped, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::GuardRemapped, HOLD_NS)),
+        max_ms(site_total(&c, Site::GuardRemapped, MAX_HOLD_NS)),
+        per(site_total(&c, Site::GuardRemapped, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::GuardRemapped, HOLDS_OVER_1MS)),
+        queue(Lock::Guards),
+        most[Lock::Guards as usize],
+    );
+    tracing::info!(
+        "JOURNAL and VIEWS locks per frame: JOURNAL by write-watch askings and guard checks {:.0} taken, {:.2} ms \
+         waiting (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} ms held (longest {:.2} ms, {:.1} over 0.1 ms, {:.2} over \
+         1 ms); JOURNAL by looks at askings ahead {:.0} taken, {:.2} ms waiting (longest {:.2} ms, {:.1} over 0.1 ms), \
+         {:.2} ms held (longest {:.2} ms, {:.1} over 0.1 ms, {:.2} over 1 ms); JOURNAL by askings ahead {:.0} taken, \
+         {:.2} ms waiting (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} ms held (longest {:.2} ms, {:.1} over 0.1 ms, \
+         {:.2} over 1 ms); JOURNAL otherwise {:.0} taken, {:.2} ms waiting (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} \
+         ms held (longest {:.2} ms, {:.1} over 0.1 ms, {:.2} over 1 ms); VIEWS with GUARDS held {:.0} taken, {:.2} ms \
+         waiting (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} ms held (longest {:.2} ms, {:.1} over 0.1 ms, {:.2} over \
+         1 ms); VIEWS otherwise {:.0} taken, {:.2} ms waiting (longest {:.2} ms, {:.1} over 0.1 ms), {:.2} ms held \
+         (longest {:.2} ms, {:.1} over 0.1 ms, {:.2} over 1 ms); JOURNAL {:.2} threads already waiting on average when \
+         taken, {} at most; VIEWS {:.2}, {} at most",
+        per(site_total(&c, Site::JournalWrites, TAKEN)),
+        ms(site_total(&c, Site::JournalWrites, WAIT_NS)),
+        max_ms(site_total(&c, Site::JournalWrites, MAX_WAIT_NS)),
+        per(site_total(&c, Site::JournalWrites, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::JournalWrites, HOLD_NS)),
+        max_ms(site_total(&c, Site::JournalWrites, MAX_HOLD_NS)),
+        per(site_total(&c, Site::JournalWrites, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::JournalWrites, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::JournalAsked, TAKEN)),
+        ms(site_total(&c, Site::JournalAsked, WAIT_NS)),
+        max_ms(site_total(&c, Site::JournalAsked, MAX_WAIT_NS)),
+        per(site_total(&c, Site::JournalAsked, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::JournalAsked, HOLD_NS)),
+        max_ms(site_total(&c, Site::JournalAsked, MAX_HOLD_NS)),
+        per(site_total(&c, Site::JournalAsked, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::JournalAsked, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::JournalAsk, TAKEN)),
+        ms(site_total(&c, Site::JournalAsk, WAIT_NS)),
+        max_ms(site_total(&c, Site::JournalAsk, MAX_WAIT_NS)),
+        per(site_total(&c, Site::JournalAsk, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::JournalAsk, HOLD_NS)),
+        max_ms(site_total(&c, Site::JournalAsk, MAX_HOLD_NS)),
+        per(site_total(&c, Site::JournalAsk, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::JournalAsk, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::JournalOther, TAKEN)),
+        ms(site_total(&c, Site::JournalOther, WAIT_NS)),
+        max_ms(site_total(&c, Site::JournalOther, MAX_WAIT_NS)),
+        per(site_total(&c, Site::JournalOther, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::JournalOther, HOLD_NS)),
+        max_ms(site_total(&c, Site::JournalOther, MAX_HOLD_NS)),
+        per(site_total(&c, Site::JournalOther, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::JournalOther, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::ViewsUnderGuards, TAKEN)),
+        ms(site_total(&c, Site::ViewsUnderGuards, WAIT_NS)),
+        max_ms(site_total(&c, Site::ViewsUnderGuards, MAX_WAIT_NS)),
+        per(site_total(&c, Site::ViewsUnderGuards, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::ViewsUnderGuards, HOLD_NS)),
+        max_ms(site_total(&c, Site::ViewsUnderGuards, MAX_HOLD_NS)),
+        per(site_total(&c, Site::ViewsUnderGuards, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::ViewsUnderGuards, HOLDS_OVER_1MS)),
+        per(site_total(&c, Site::ViewsOther, TAKEN)),
+        ms(site_total(&c, Site::ViewsOther, WAIT_NS)),
+        max_ms(site_total(&c, Site::ViewsOther, MAX_WAIT_NS)),
+        per(site_total(&c, Site::ViewsOther, WAITS_OVER_100US)),
+        ms(site_total(&c, Site::ViewsOther, HOLD_NS)),
+        max_ms(site_total(&c, Site::ViewsOther, MAX_HOLD_NS)),
+        per(site_total(&c, Site::ViewsOther, HOLDS_OVER_100US)),
+        per(site_total(&c, Site::ViewsOther, HOLDS_OVER_1MS)),
+        queue(Lock::Journal),
+        most[Lock::Journal as usize],
+        queue(Lock::Views),
+        most[Lock::Views as usize],
+    );
+    tracing::info!(
+        "lock time per frame by thread: in submissions GUARDS {:.2} ms waiting {:.2} ms held, JOURNAL {:.2} ms waiting \
+         {:.2} ms held, VIEWS {:.2} ms waiting {:.2} ms held; title submitting threads outside submissions GUARDS {:.2} \
+         ms waiting {:.2} ms held, JOURNAL {:.2} ms waiting {:.2} ms held, VIEWS {:.2} ms waiting {:.2} ms held; the \
+         relay GUARDS {:.2} ms waiting {:.2} ms held, JOURNAL {:.2} ms waiting {:.2} ms held, VIEWS {:.2} ms waiting \
+         {:.2} ms held; other threads GUARDS {:.2} ms waiting {:.2} ms held, JOURNAL {:.2} ms waiting {:.2} ms held, \
+         VIEWS {:.2} ms waiting {:.2} ms held",
+        ms(lock_role_total(&c, Lock::Guards, Role::Submitting, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, Role::Submitting, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, Role::Submitting, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, Role::Submitting, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, Role::Submitting, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, Role::Submitting, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, Role::TitleSubmitter, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, Role::TitleSubmitter, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, Role::TitleSubmitter, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, Role::TitleSubmitter, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, Role::TitleSubmitter, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, Role::TitleSubmitter, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, Role::Relay, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, Role::Relay, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, Role::Relay, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, Role::Relay, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, Role::Relay, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, Role::Relay, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Guards, Role::Other, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Guards, Role::Other, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Journal, Role::Other, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Journal, Role::Other, HOLD_NS)),
+        ms(lock_role_total(&c, Lock::Views, Role::Other, WAIT_NS)),
+        ms(lock_role_total(&c, Lock::Views, Role::Other, HOLD_NS)),
+    );
+    tracing::info!(
+        "guard lock around checks and faults per frame: {:.2} ms asking whether ranges are views before taking the \
+         lock, {:.2} ms asking about uncommitted blocks holding it; {:.1} write faults found their block open already; \
+         write faults waited {:.2} ms on title submitting threads and {:.2} ms on other threads",
+        ms(extra[IS_VIEW_NS]),
+        ms(extra[UNCOMMITTED_NS]),
+        per(extra[FAULTS_FOUND_OPEN]),
+        ms(c[Site::GuardFault as usize][Role::TitleSubmitter as usize][WAIT_NS]),
+        ms(c[Site::GuardFault as usize][Role::Submitting as usize][WAIT_NS] + c[Site::GuardFault as usize][Role::Relay as usize][WAIT_NS] + c[Site::GuardFault as usize][Role::Other as usize][WAIT_NS]),
+    );
+}
+
 /// Microseconds since the first call.
 fn now_us() -> u64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -1062,6 +1254,7 @@ pub(crate) fn recorded(started: std::time::Instant) {
 /// submission lock).
 pub(crate) fn submission_begins() {
     crate::watch::stats::set_submitting(true);
+    crate::lockstat::submission(true);
     let now = now_us();
     if !SUBMITTED_SINCE.load(Relaxed) && !SUBMITTED_SINCE.swap(true, Relaxed) {
         add(C::UntilSubmitUs, now.saturating_sub(PRESENTED_AT.load(Relaxed)));
@@ -1083,6 +1276,7 @@ pub(crate) fn submission_begins() {
 /// submission lock.
 pub(crate) fn submission_ends(lock: u64) {
     crate::watch::stats::set_submitting(false);
+    crate::lockstat::submission(false);
     let now = now_us();
     SUBMITTED_AT.store(now, Relaxed);
     let (user, kernel) = thread_times();
@@ -1199,6 +1393,7 @@ pub(crate) fn log(frames: f64) {
         mb(c[C::GpuWritesLeftOutBytes as usize]),
     );
     log_protections(frames);
+    log_locks(frames);
     let [together, written, mapped] =
         [0, 1, 2].map(|n| crate::watch::ALIASES[n].load(std::sync::atomic::Ordering::Relaxed));
     tracing::info!(

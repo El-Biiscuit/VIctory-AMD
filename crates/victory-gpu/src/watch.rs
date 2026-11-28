@@ -77,7 +77,7 @@ const AHEAD_MAX: usize = (1 << 30) / PAGE;
 /// 456 ms, in run 14). Ranges that are not write-watched, or lie alone, are
 /// left to `writes`.
 pub(crate) fn ask_ahead(ranges: impl Iterator<Item = (usize, usize)>) {
-    let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut j = journal_lock(Site::JournalAsk);
     // The submission's one asking stands ([`ask_once`]): what it does not
     // hold is left to `writes`. Avoid collecting and sorting the ranges
     // every time the submission flushes a batch.
@@ -147,7 +147,7 @@ pub(crate) fn slow_asks() -> [u64; 3] {
 
 /// The submission's refreshes are done: `writes` asks the kernel again.
 pub(crate) fn ask_ahead_done() {
-    let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut j = journal_lock(Site::JournalOther);
     if !j.kept {
         j.ahead.clear();
     }
@@ -188,7 +188,7 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
     // Distinct host copies can ask for the same guest pages. In particular,
     // don't retry a failed GetWriteWatch for every copy with that span.
     pieces.dedup();
-    let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut j = journal_lock(Site::JournalAsk);
     let j = &mut *j;
     ask_groups(j, &pieces);
     // `ask_groups` leaves a range that lies alone to `writes`, which asks
@@ -207,7 +207,7 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
 /// The submission's one asking stands no longer: its refreshes are done,
 /// or title memory was written in a way the journal was not told.
 pub(crate) fn ask_once_end() {
-    let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut j = journal_lock(Site::JournalOther);
     if j.kept {
         j.kept = false;
         j.ahead.clear();
@@ -218,7 +218,7 @@ pub(crate) fn ask_once_end() {
 /// stands (the title's buffer copies, done at submission): its pages count
 /// as written after that asking, so the refreshes that follow copy them.
 pub(crate) fn wrote(at: usize, len: usize) {
-    let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut j = journal_lock(Site::JournalOther);
     if !j.kept || len == 0 {
         return;
     }
@@ -301,7 +301,7 @@ fn note_kernel_writes(j: &mut Journal, count: usize, now: u64) {
 /// it). `None` if the kernel would have to be asked.
 pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)> {
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
-    let j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    let j = journal_lock(Site::JournalAsked);
     j.ahead
         .iter()
         .any(|&(a, b)| a <= first && last <= b)
@@ -317,7 +317,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
-    let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut j = journal_lock(Site::JournalWrites);
     let j = &mut *j;
     // Asked ahead with the submission's other ranges: the journal has it.
     if j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
@@ -393,7 +393,8 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
 /// ours beside the submissions (the relay, texture refreshes).
 #[cfg(any(test, feature = "diagnostics"))]
 pub(crate) mod stats {
-    use super::{Change, Wait};
+    use super::Change;
+    use crate::lockstat::Site;
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
     /// The kinds of [`Change`].
@@ -414,7 +415,7 @@ pub(crate) mod stats {
     /// already guarded would have made.
     pub(crate) const FAULTS: usize = 0;
     pub(crate) const FAULT_US: usize = 1;
-    pub(crate) const WAITS: usize = 2; // then US of it, per Wait: 2..8
+    pub(crate) const WAITS: usize = 2; // count then microseconds, for checks, faults, writes told: 2..8
     pub(crate) const CHECKS: usize = 8;
     pub(crate) const CHECK_CALLS: usize = 9;
     pub(crate) const CHECK_JOINED: usize = 10;
@@ -477,59 +478,106 @@ pub(crate) mod stats {
         done
     }
 
-    /// Runs of contiguous blocks in `blocks` (in any order, repeats
-    /// allowed).
-    pub(crate) fn runs_of(mut blocks: Vec<usize>) -> usize {
-        blocks.sort_unstable();
-        blocks.dedup();
-        blocks.windows(2).filter(|w| w[1] != w[0] + 1).count() + usize::from(!blocks.is_empty())
+    /// Runs of contiguous blocks, counted as the blocks come (no list kept:
+    /// this runs under the guard lock). Exact for blocks in increasing
+    /// order; for others, an upper bound.
+    #[derive(Default)]
+    pub(super) struct Runs {
+        last: Option<usize>,
+        runs: u64,
     }
 
-    /// `blocks` were changed one call each for `change`: how many runs
-    /// they make.
-    pub(super) fn runs(change: Change, blocks: Vec<usize>) {
-        if on() && !blocks.is_empty() {
-            add(change, RUNS, runs_of(blocks) as u64);
-        }
-    }
-
-    /// How many calls the runs `guarded` (in order) need when two runs
-    /// with only guarded blocks between them (`all_guarded(from, to)`) are
-    /// joined into one.
-    pub(crate) fn joined_calls(guarded: &[(usize, usize)], all_guarded: impl Fn(usize, usize) -> bool) -> usize {
-        let mut calls = 0;
-        let mut end = None;
-        for &(from, to) in guarded {
-            match end {
-                Some(e) if e <= from && all_guarded(e, from) => {}
-                _ => calls += 1,
+    impl Runs {
+        pub(super) fn push(&mut self, block: usize) {
+            if self.last.is_none_or(|l| l.checked_add(1) != Some(block)) {
+                self.runs += 1;
             }
-            end = Some(to);
+            self.last = Some(block);
         }
-        calls
+
+        pub(super) fn count(&self) -> u64 {
+            self.runs
+        }
+
+        /// Sorted `blocks` were changed one call each for `change`.
+        pub(super) fn record_sorted(change: Change, blocks: &[usize]) {
+            if on() {
+                let runs = runs_sorted(blocks);
+                if runs > 0 {
+                    add(change, RUNS, runs);
+                }
+            }
+        }
+
+        /// The blocks pushed were changed one call each for `change`.
+        pub(super) fn record(&self, change: Change) {
+            if on() && self.runs > 0 {
+                add(change, RUNS, self.runs);
+            }
+        }
     }
 
-    /// A check guarded the runs `guarded`.
-    pub(super) fn check_guarded(guarded: &[(usize, usize)], all_guarded: impl Fn(usize, usize) -> bool) {
-        if !on() || guarded.is_empty() {
-            return;
+    /// Runs of contiguous blocks in sorted `blocks`.
+    pub(crate) fn runs_sorted(blocks: &[usize]) -> u64 {
+        let mut runs = Runs::default();
+        for &b in blocks {
+            runs.push(b);
         }
-        add_other(CHECKS, 1);
-        add_other(CHECK_CALLS, guarded.len() as u64);
-        add_other(CHECK_JOINED, joined_calls(guarded, all_guarded) as u64);
+        runs.count()
     }
 
-    /// Takes the guard lock with `lock`, counting the wait.
-    pub(super) fn waited<T>(who: Wait, lock: impl FnOnce() -> T) -> T {
-        if !on() {
-            return lock();
+    /// The runs one check guards, in order, and how many calls they would
+    /// need when two runs with only guarded blocks between them are joined.
+    #[derive(Default)]
+    pub(super) struct Joins {
+        end: Option<usize>,
+        calls: u64,
+        joined: u64,
+    }
+
+    impl Joins {
+        /// A run `[from, to)`; `all_guarded(a, b)` tells whether every block
+        /// of `[a, b)` is guarded now.
+        pub(super) fn push(&mut self, from: usize, to: usize, all_guarded: impl Fn(usize, usize) -> bool) {
+            self.calls += 1;
+            match self.end {
+                Some(e) if e <= from && all_guarded(e, from) => {}
+                _ => self.joined += 1,
+            }
+            self.end = Some(to);
         }
-        let started = std::time::Instant::now();
-        let held = lock();
-        let at = WAITS + 2 * who as usize;
-        add_other(at, 1);
-        add_other(at + 1, started.elapsed().as_micros() as u64);
-        held
+
+        pub(super) fn record(&self) {
+            if on() && self.calls > 0 {
+                add_other(CHECKS, 1);
+                add_other(CHECK_CALLS, self.calls);
+                add_other(CHECK_JOINED, self.joined);
+            }
+        }
+    }
+
+    /// The calls joined runs would need (tests).
+    #[cfg(test)]
+    pub(crate) fn joined_calls(guarded: &[(usize, usize)], all_guarded: impl Fn(usize, usize) -> bool) -> u64 {
+        let mut joins = Joins::default();
+        for &(from, to) in guarded {
+            joins.push(from, to, &all_guarded);
+        }
+        joins.joined
+    }
+
+    /// A wait for the guard lock by `who`, as `lockstat` timed it.
+    pub(super) fn note_wait(who: Site, us: Option<u64>) {
+        let at = match who {
+            Site::GuardCheck => WAITS,
+            Site::GuardFault => WAITS + 2,
+            Site::GuardWrite => WAITS + 4,
+            _ => return,
+        };
+        if let (true, Some(us)) = (on(), us) {
+            add_other(at, 1);
+            add_other(at + 1, us);
+        }
     }
 
     /// A write fault in the handler, from [`Fault::begin`] to its drop.
@@ -567,16 +615,22 @@ pub(crate) mod stats {
 
     #[cfg(test)]
     mod tests {
-        use super::{joined_calls, runs_of};
+        use super::{Runs, joined_calls, runs_sorted};
 
         #[test]
         fn runs_count_contiguous_blocks() {
-            assert_eq!(runs_of(vec![]), 0);
-            assert_eq!(runs_of(vec![7]), 1);
-            assert_eq!(runs_of(vec![3, 4, 5]), 1);
-            assert_eq!(runs_of(vec![5, 3, 4, 9, 10, 4]), 2);
-            assert_eq!(runs_of(vec![1, 3, 5]), 3);
-            assert_eq!(runs_of(vec![usize::MAX - 1, usize::MAX]), 1);
+            assert_eq!(runs_sorted(&[]), 0);
+            assert_eq!(runs_sorted(&[7]), 1);
+            assert_eq!(runs_sorted(&[3, 4, 5]), 1);
+            assert_eq!(runs_sorted(&[3, 4, 9, 10]), 2);
+            assert_eq!(runs_sorted(&[1, 3, 5]), 3);
+            assert_eq!(runs_sorted(&[usize::MAX - 1, usize::MAX]), 1);
+            // Out of order: an upper bound.
+            let mut r = Runs::default();
+            for b in [5, 3, 4] {
+                r.push(b);
+            }
+            assert_eq!(r.count(), 2);
         }
 
         #[test]
@@ -684,32 +738,91 @@ static GUARDS: Mutex<Guards> = Mutex::new(Guards {
     aliased: BTreeSet::new(),
 });
 
+impl Guards {
+    /// Whether every block of `[a, b)` is guarded: clean, or read-only
+    /// and not clean (written through the runtime). For the statistics:
+    /// walks the clean runs and the blocks between them, allocating
+    /// nothing.
+    #[cfg(any(test, feature = "diagnostics"))]
+    fn all_guarded(&self, a: usize, b: usize) -> bool {
+        let mut at = a;
+        while at < b {
+            match self.clean.0.range(..=at).next_back() {
+                Some((_, &end)) if end > at => at = end,
+                _ if self.protected.contains(&at) => at += 1,
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+/// The guard lock, uncounted: builds without diagnostics, and tests that
+/// look at the state directly. Everything else takes it through
+/// [`guard_lock`].
+#[cfg(any(test, not(feature = "diagnostics")))]
 fn guards() -> std::sync::MutexGuard<'static, Guards> {
     GUARDS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Who waits for the guard lock, for the statistics.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Wait {
-    /// A check of a copy's range ([`guard`]).
-    Check,
-    /// The handler of a write to a guarded block (the title's thread).
-    Fault,
-    /// A write the runtime or we tell of ([`writing`]).
-    Write,
-}
+/// The guard lock held ([`guard_lock`]): counted by `lockstat` in
+/// diagnostics builds and tests, a plain guard otherwise.
+#[cfg(any(test, feature = "diagnostics"))]
+type GuardsHeld = crate::lockstat::Held<'static, Guards>;
+#[cfg(not(any(test, feature = "diagnostics")))]
+type GuardsHeld = std::sync::MutexGuard<'static, Guards>;
 
-/// [`guards`], with the wait for the lock counted.
-fn guard_lock(who: Wait) -> std::sync::MutexGuard<'static, Guards> {
+/// The journal lock held ([`journal_lock`]).
+#[cfg(any(test, feature = "diagnostics"))]
+type JournalHeld = crate::lockstat::Held<'static, Journal>;
+#[cfg(not(any(test, feature = "diagnostics")))]
+type JournalHeld = std::sync::MutexGuard<'static, Journal>;
+
+/// [`guards`] for `site`: the same lock, taken the same way; its wait and
+/// hold are counted (`crate::lockstat`).
+#[cfg_attr(not(any(test, feature = "diagnostics")), allow(unused_variables))]
+fn guard_lock(site: Site) -> GuardsHeld {
     #[cfg(any(test, feature = "diagnostics"))]
     {
-        stats::waited(who, guards)
+        let held = crate::lockstat::take(site, &GUARDS, stats::on());
+        stats::note_wait(site, held.waited_us());
+        held
     }
     #[cfg(not(any(test, feature = "diagnostics")))]
     {
-        let _ = who;
         guards()
     }
+}
+
+/// The journal lock for `site`, taken as before, counted the same way.
+#[cfg_attr(not(any(test, feature = "diagnostics")), allow(unused_variables))]
+fn journal_lock(site: Site) -> JournalHeld {
+    #[cfg(any(test, feature = "diagnostics"))]
+    {
+        crate::lockstat::take(site, &JOURNAL, false)
+    }
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    {
+        JOURNAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Who takes the guard and journal locks (diagnostics; a stand-in without).
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::lockstat::Site;
+#[cfg(not(any(test, feature = "diagnostics")))]
+#[derive(Clone, Copy)]
+enum Site {
+    GuardCheck,
+    GuardKnown,
+    GuardFault,
+    GuardWrite,
+    GuardMapped,
+    GuardRemapped,
+    JournalWrites,
+    JournalAsked,
+    JournalAsk,
+    JournalOther,
 }
 
 /// What a protection change is for, for the statistics.
@@ -761,26 +874,36 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
     // `VICTORY_GUARD_ASK=1` asks every time, as before.
     static ASK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let known = !*ASK.get_or_init(|| std::env::var_os("VICTORY_GUARD_ASK").is_some_and(|v| v == "1")) && {
-        let g = guards();
+        let g = guard_lock(Site::GuardKnown);
         let first = start / BLOCK;
         g.protected.contains(&first) || g.absent.contains(&first)
     };
-    if !known && !is_view(start, end) {
-        return None;
+    if !known {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let asking = crate::lockstat::on().then(std::time::Instant::now);
+        let view = is_view(start, end);
+        #[cfg(any(test, feature = "diagnostics"))]
+        if let Some(asking) = asking {
+            crate::lockstat::extra(crate::lockstat::IS_VIEW_NS, asking.elapsed().as_nanos() as u64);
+        }
+        if !view {
+            return None;
+        }
     }
     install();
-    let mut g = guard_lock(Wait::Check);
+    let mut g = guard_lock(Site::GuardCheck);
     let mut written = Vec::new();
     let (first, last) = (start / BLOCK, end.div_ceil(BLOCK));
     let mut uncommitted_until = first;
     // The runs this check guards, for the statistics: how many calls a
-    // join across blocks already guarded would have made.
+    // join across blocks already guarded would have made (counted as they
+    // come: nothing is kept under the lock).
     #[cfg(any(test, feature = "diagnostics"))]
-    let mut guarded: Vec<(usize, usize)> = Vec::new();
+    let mut joins = stats::Joins::default();
     #[cfg_attr(not(any(test, feature = "diagnostics")), allow(unused_mut))]
     let mut protect = |g: &mut Guards, from: usize, to: usize| {
         #[cfg(any(test, feature = "diagnostics"))]
-        guarded.push((from, to));
+        joins.push(from, to, |a, b| g.all_guarded(a, b));
         protect(g, from, to);
     };
     for gap in g.clean.gaps(first, last) {
@@ -790,7 +913,13 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
                 // Ordinary commits need no runtime mapping notification. Reuse
                 // this query for the following blocks in the same region.
                 if block >= uncommitted_until {
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    let asking = crate::lockstat::on().then(std::time::Instant::now);
                     uncommitted_until = uncommitted_end(block);
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    if let Some(asking) = asking {
+                        crate::lockstat::extra(crate::lockstat::UNCOMMITTED_NS, asking.elapsed().as_nanos() as u64);
+                    }
                 }
                 if block < uncommitted_until {
                     if let Some(from) = run.take() {
@@ -816,12 +945,8 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
             protect(&mut g, from, gap.end);
         }
     }
-    // Between two runs: guarded if every block there is clean or, not
-    // clean, still read-only (a few blocks at most; no walk of the set).
     #[cfg(any(test, feature = "diagnostics"))]
-    stats::check_guarded(&guarded, |a, b| {
-        g.clean.gaps(a, b).into_iter().flatten().all(|block| g.protected.contains(&block))
-    });
+    joins.record();
     Some(written)
 }
 
@@ -883,7 +1008,7 @@ fn protect(g: &mut Guards, from: usize, to: usize) {
     // The other views' blocks this guarded, for the statistics (one call
     // each now; runs of them could be one call).
     #[cfg(any(test, feature = "diagnostics"))]
-    let mut aliases: Vec<usize> = Vec::new();
+    let mut aliases = stats::Runs::default();
     for (base, bytes) in crate::inplace::views_between(from.saturating_mul(BLOCK), to.saturating_mul(BLOCK)) {
         let first = (base / BLOCK).max(from);
         let last = (base.saturating_add(bytes).div_ceil(BLOCK)).min(to);
@@ -908,7 +1033,7 @@ fn protect(g: &mut Guards, from: usize, to: usize) {
         }
     }
     #[cfg(any(test, feature = "diagnostics"))]
-    stats::runs(Change::Alias, aliases);
+    aliases.record(Change::Alias);
 }
 
 /// Views of one page past which its views are not guarded together.
@@ -1009,14 +1134,14 @@ fn open(g: &mut Guards, start: usize, end: usize, why: Change) -> bool {
     let opened = open_here(g, start, end, why);
     let any = !opened.is_empty();
     #[cfg(any(test, feature = "diagnostics"))]
-    stats::runs(why, opened);
+    stats::Runs::record_sorted(why, &opened);
     if start >= end || g.aliased.is_empty() {
         return any;
     }
     // The other views' blocks this opens, for the statistics (one call
     // each now; runs of them could be one call).
     #[cfg(any(test, feature = "diagnostics"))]
-    let mut others: Vec<usize> = Vec::new();
+    let mut others = stats::Runs::default();
     let aliased: Vec<usize> = g.aliased.range(start / BLOCK..end.div_ceil(BLOCK)).copied().collect();
     for block in aliased {
         g.aliased.remove(&block);
@@ -1027,14 +1152,14 @@ fn open(g: &mut Guards, start: usize, end: usize, why: Change) -> bool {
                     #[cfg(feature = "diagnostics")]
                     ALIASES[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     #[cfg(any(test, feature = "diagnostics"))]
-                    others.extend(opened);
+                    opened.iter().for_each(|&b| others.push(b));
                 }
             }
             g.aliased.remove(&(alias / BLOCK));
         }
     }
     #[cfg(any(test, feature = "diagnostics"))]
-    stats::runs(Change::OpenAlias, others);
+    others.record(Change::OpenAlias);
     any
 }
 
@@ -1065,7 +1190,7 @@ fn open_here(g: &mut Guards, start: usize, end: usize, why: Change) -> Vec<usize
 /// reads into its own memory.
 pub fn writing(at: usize, len: usize) {
     // The length is the title's (`fread`'s size times count, saturated).
-    open(&mut guard_lock(Wait::Write), at, at.saturating_add(len), Change::OpenWrite);
+    open(&mut guard_lock(Site::GuardWrite), at, at.saturating_add(len), Change::OpenWrite);
     // A placed texture there changes with no descriptor written.
     crate::descriptor::host::remapped(at, len);
 }
@@ -1092,20 +1217,20 @@ pub(crate) fn views_mapped(section: usize, offset: u64, len: usize) {
     if ranges.is_empty() {
         return;
     }
-    let mut g = guards();
+    let mut g = guard_lock(Site::GuardMapped);
     #[cfg(any(test, feature = "diagnostics"))]
-    let mut opened_all: Vec<usize> = Vec::new();
+    let mut opened_all = stats::Runs::default();
     for &(at, n) in &ranges {
         let opened = open_here(&mut g, at, at.saturating_add(n), Change::OpenMapped);
         if !opened.is_empty() {
             #[cfg(feature = "diagnostics")]
             ALIASES[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             #[cfg(any(test, feature = "diagnostics"))]
-            opened_all.extend(opened);
+            opened.iter().for_each(|&b| opened_all.push(b));
         }
     }
     #[cfg(any(test, feature = "diagnostics"))]
-    stats::runs(Change::OpenMapped, opened_all);
+    opened_all.record(Change::OpenMapped);
 }
 
 /// A direct read pins the virtual addresses it will read. A mapping change
@@ -1246,7 +1371,7 @@ pub fn title_memory_remapped(at: usize, len: usize) {
     crate::inplace::views_gone(at, len);
     // And nothing stays in place over it.
     crate::inplace::title_memory_freeing(at, len);
-    let mut g = guards();
+    let mut g = guard_lock(Site::GuardRemapped);
     let range = at / BLOCK..at.saturating_add(len).div_ceil(BLOCK);
     let absent: Vec<usize> = g.absent.range(range.clone()).copied().collect();
     for block in absent {
@@ -1287,12 +1412,16 @@ fn install() {
         // Held across both checks: another thread may have opened the block
         // since this one faulted, and a copy may have guarded it again since
         // (then it is ours again, not read-only for some other reason).
-        let mut g = guard_lock(Wait::Fault);
+        let mut g = guard_lock(Site::GuardFault);
         if open(&mut g, at, at + 1, Change::OpenFault) {
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::GuardFaults, 1);
             return EXCEPTION_CONTINUE_EXECUTION;
         }
+        // Not ours to open now: another thread opened it first (or the
+        // fault is not a guard's).
+        #[cfg(any(test, feature = "diagnostics"))]
+        crate::lockstat::extra(crate::lockstat::FAULTS_FOUND_OPEN, 1);
         if writable(at) {
             EXCEPTION_CONTINUE_EXECUTION
         } else {
@@ -1302,9 +1431,12 @@ fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     // SAFETY: the handler only touches our guard state and protections.
     ONCE.call_once(|| unsafe {
-        // The statistics' switch is read here, not first in the handler.
+        // The statistics' switches are read here, not first in the handler.
         #[cfg(any(test, feature = "diagnostics"))]
-        stats::on();
+        {
+            stats::on();
+            crate::lockstat::on();
+        }
         AddVectoredExceptionHandler(1, Some(on_write));
     });
 }
@@ -2027,6 +2159,134 @@ mod tests {
         // SAFETY: our reservation.
         unsafe { VirtualFree(p as *mut _, 0, MEM_RELEASE) };
         let _ = counted();
+    }
+
+    /// The lock counts of this thread for one site, summed over roles.
+    fn lock_counts(c: &crate::lockstat::Counts, site: crate::lockstat::Site) -> [u64; crate::lockstat::FIELDS] {
+        let mut sum = [0; crate::lockstat::FIELDS];
+        for role in &c[site as usize] {
+            for (s, v) in sum.iter_mut().zip(role) {
+                *s += v;
+            }
+        }
+        sum
+    }
+
+    /// Each taking of the guard lock is counted under its site: the look
+    /// before a check, the check, the fault, the write told; the views'
+    /// lock taken by the check and by the fault while they hold the guard
+    /// lock counts apart. What the guards do is unchanged.
+    #[test]
+    fn lock_takings_are_counted_by_site() {
+        use crate::lockstat::{HOLD_NS, MAX_HOLD_NS, Role, Site, TAKEN};
+        const SIZE: usize = 2 * BLOCK;
+        let (section, guarded, other) = two_views(SIZE);
+        let _ = crate::lockstat::mine();
+        assert_eq!(guard(guarded, guarded + SIZE).map(|w| w.len()), Some(2 * BLOCK / PAGE));
+        let c = crate::lockstat::mine();
+        assert_eq!(lock_counts(&c, Site::GuardKnown)[TAKEN], 1);
+        assert_eq!(lock_counts(&c, Site::GuardCheck)[TAKEN], 1);
+        // The other views looked up under the guard lock.
+        assert!(lock_counts(&c, Site::ViewsUnderGuards)[TAKEN] >= 1);
+        let check = lock_counts(&c, Site::GuardCheck);
+        assert!(check[MAX_HOLD_NS] <= check[HOLD_NS]);
+        // On this test thread: neither a submission nor a title submitter.
+        assert_eq!(c[Site::GuardCheck as usize][Role::Other as usize][TAKEN], 1);
+
+        // SAFETY: the other view, read-write once the handler has opened it.
+        unsafe { ((other + 8) as *mut u8).write_volatile(5) };
+        let c = crate::lockstat::mine();
+        assert_eq!(lock_counts(&c, Site::GuardFault)[TAKEN], 1);
+        assert!(lock_counts(&c, Site::ViewsUnderGuards)[TAKEN] >= 1, "the fault's alias lookup");
+
+        writing(other + BLOCK, BLOCK);
+        let c = crate::lockstat::mine();
+        assert_eq!(lock_counts(&c, Site::GuardWrite)[TAKEN], 1);
+        // SAFETY: both views show the same bytes.
+        assert_eq!(unsafe { ((guarded + 8) as *const u8).read_volatile() }, 5);
+        drop_views(section, &[guarded, other], SIZE);
+        let _ = crate::lockstat::mine();
+    }
+
+    /// A write fault on a title submitting thread while another thread holds
+    /// the guard lock (a long check): its wait is counted under the fault
+    /// and that role, and the write lands once the lock is released.
+    #[test]
+    fn a_fault_waiting_for_a_check_is_counted_on_the_critical_path() {
+        use crate::lockstat::{Role, Site, TAKEN, WAIT_NS, WAITS_OVER_100US};
+        const SIZE: usize = BLOCK;
+        let (section, guarded, other) = two_views(SIZE);
+        assert!(guard(guarded, guarded + SIZE).is_some());
+        let (taken_tx, taken_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let g = guard_lock(Site::GuardCheck);
+            taken_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            drop(g);
+        });
+        taken_rx.recv().unwrap();
+        let writer = std::thread::spawn(move || {
+            // A title thread that has submitted, now outside its submission.
+            crate::lockstat::submission(true);
+            crate::lockstat::submission(false);
+            let _ = crate::lockstat::mine();
+            // SAFETY: the guarded view, opened by the handler once it can
+            // take the lock.
+            unsafe { ((guarded + 16) as *mut u8).write_volatile(9) };
+            crate::lockstat::mine()
+        });
+        let c = writer.join().unwrap();
+        holder.join().unwrap();
+        let mine = c[Site::GuardFault as usize][Role::TitleSubmitter as usize];
+        assert_eq!(mine[TAKEN], 1);
+        assert!(mine[WAIT_NS] >= 20_000_000, "waited {} ns", mine[WAIT_NS]);
+        assert_eq!(mine[WAITS_OVER_100US], 1);
+        // SAFETY: the other view shows the same bytes.
+        assert_eq!(unsafe { ((other + 16) as *const u8).read_volatile() }, 9);
+        drop_views(section, &[guarded, other], SIZE);
+    }
+
+    /// Two threads fault on the same block while the lock is held: one
+    /// opens it, the other finds it open; the second joined a queue; both
+    /// writes land.
+    #[test]
+    fn faults_on_one_block_queue_and_one_finds_it_open() {
+        use crate::lockstat::{FAULTS_FOUND_OPEN, QUEUED, Site, TAKEN};
+        const SIZE: usize = BLOCK;
+        let (section, guarded, other) = two_views(SIZE);
+        assert!(guard(guarded, guarded + SIZE).is_some());
+        let (taken_tx, taken_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let g = guard_lock(Site::GuardCheck);
+            taken_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(g);
+        });
+        taken_rx.recv().unwrap();
+        let write = move |offset: usize, value: u8| {
+            std::thread::spawn(move || {
+                let _ = crate::lockstat::mine();
+                // SAFETY: the guarded view, opened by the handler.
+                unsafe { ((guarded + offset) as *mut u8).write_volatile(value) };
+                crate::lockstat::mine()
+            })
+        };
+        let a = write(100, 1);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let b = write(200, 2);
+        let (a, b) = (a.join().unwrap(), b.join().unwrap());
+        holder.join().unwrap();
+        let fault = |c: &crate::lockstat::Counts| lock_counts(c, Site::GuardFault);
+        assert_eq!(fault(&a)[TAKEN] + fault(&b)[TAKEN], 2);
+        assert!(fault(&a)[QUEUED] + fault(&b)[QUEUED] >= 1, "the second joined a queue");
+        // Other tests may add to the global count meanwhile: at least ours.
+        assert!(crate::lockstat::take_extra()[FAULTS_FOUND_OPEN] >= 1);
+        // SAFETY: the other view shows the same bytes.
+        unsafe {
+            assert_eq!(((other + 100) as *const u8).read_volatile(), 1);
+            assert_eq!(((other + 200) as *const u8).read_volatile(), 2);
+        }
+        drop_views(section, &[guarded, other], SIZE);
     }
 
     /// A write or mapping that runs past the end of the address space (a

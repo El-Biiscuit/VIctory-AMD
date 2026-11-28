@@ -48,6 +48,28 @@ pub enum Cmd {
         #[command(flatten)]
         opts: Opts,
     },
+    /// Steady periods against bursts (of texture streaming, by default) in
+    /// the same logs and selection, with spread and correlations.
+    Regimes {
+        #[arg(required = true)]
+        logs: Vec<PathBuf>,
+        #[command(flatten)]
+        regime: RegimeOpts,
+        #[command(flatten)]
+        opts: Opts,
+    },
+}
+
+#[derive(Args, Clone)]
+pub struct RegimeOpts {
+    /// The copystat figure that marks a burst.
+    #[arg(long, default_value = "account.tex_uploads")]
+    burst_key: String,
+    /// Windows where it is at least this are bursts (300 texture uploads
+    /// a frame: the heavy streaming of the reference logs, above the
+    /// 100-260 of ordinary play and the 5-45 of quiet scenes).
+    #[arg(long, default_value_t = 300.0)]
+    burst_min: f64,
 }
 
 #[derive(Args, Clone)]
@@ -164,6 +186,53 @@ pub fn run(cmd: Cmd) -> Result<()> {
             }
             if let Some(p) = &opts.csv {
                 write(p, &summary.csv())?;
+            }
+            if let Some(p) = &opts.samples_csv {
+                write(p, &report::samples_csv(&selected))?;
+            }
+            Ok(())
+        }
+        Cmd::Regimes { logs, regime, opts } => {
+            let runs = load(&logs)?;
+            if runs.iter().all(|r| r.ticks.is_empty()) {
+                bail!("no runtime counter lines found in the given logs");
+            }
+            let sel = opts.selection();
+            let selected: Vec<parse::Selected> =
+                runs.iter().map(|r| parse::select(r, &sel)).collect();
+            let (mut steady, mut bursts) = (Vec::new(), Vec::new());
+            for s in &selected {
+                let (a, b) = parse::split(s, &regime.burst_key, regime.burst_min);
+                steady.push(a);
+                bursts.push(b);
+            }
+            if bursts.iter().all(|b| b.windows.is_empty()) {
+                eprintln!(
+                    "no window has {} >= {}: every window is steady",
+                    regime.burst_key, regime.burst_min
+                );
+            }
+            let (a, b) = (
+                report::Summary::build(&sel, &steady),
+                report::Summary::build(&sel, &bursts),
+            );
+            let regimes = report::Regimes {
+                steady: &a,
+                bursts: &b,
+                key: regime.burst_key.clone(),
+                min: regime.burst_min,
+                correlations: report::correlations(&selected, 8),
+            };
+            let md = regimes.markdown(opts.all);
+            print!("{md}");
+            if let Some(p) = &opts.md {
+                write(p, &md)?;
+            }
+            if let Some(p) = &opts.json {
+                write(p, &format!("{}\n", regimes.json()))?;
+            }
+            if let Some(p) = &opts.csv {
+                write(p, &regimes.csv())?;
             }
             if let Some(p) = &opts.samples_csv {
                 write(p, &report::samples_csv(&selected))?;
