@@ -550,7 +550,8 @@ pub(crate) mod stats {
         }
     }
 
-    /// The counts since the last call, reset.
+    /// The counts since the last call, reset (`copystat`'s line).
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn take() -> ([[u64; FIELDS]; CHANGES], [u64; OTHERS]) {
         (
             CHANGE.each_ref().map(|c| c.each_ref().map(|v| v.swap(0, Relaxed))),
