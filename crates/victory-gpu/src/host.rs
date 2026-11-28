@@ -5434,25 +5434,42 @@ impl Host {
         // one at every present).
         static SWEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if !behind {
+            #[cfg(feature = "diagnostics")]
+            let sweeping = std::time::Instant::now();
             sweep();
+            #[cfg(feature = "diagnostics")]
+            crate::prepstat::outside(crate::prepstat::SWEEP_NS, sweeping);
             SWEPT.store(now_ms(), Ordering::Relaxed);
         } else if late_free_present() && now_ms() > SWEPT.load(Ordering::Relaxed) + 1500 {
             // With the present sent ahead nothing else brings a moment
             // with nothing in the air: one is made for the sweep.
             self.settle(&mut submitted, WHY_SYNC);
+            #[cfg(feature = "diagnostics")]
+            let sweeping = std::time::Instant::now();
             sweep();
+            #[cfg(feature = "diagnostics")]
+            crate::prepstat::outside(crate::prepstat::SWEEP_NS, sweeping);
             SWEPT.store(now_ms(), Ordering::Relaxed);
         }
         let behind = late && flying();
         // The slots that waited for a texture's host copy, before the
         // lists that may read them run.
+        #[cfg(feature = "diagnostics")]
+        let making = std::time::Instant::now();
         crate::descriptor::make_waiting();
+        #[cfg(feature = "diagnostics")]
+        crate::prepstat::outside(crate::prepstat::WAITING_SLOTS_NS, making);
         let this_submission = STARTED.fetch_add(1, Ordering::AcqRel) + 1;
         // The ranges shaders write are counted for it (with the relay).
         crate::shadow::preparing(this_submission);
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
         let lock = (started - called).as_micros() as u64;
+        // The steps of the preparation timed (PR PREP-0), from `started`.
+        #[cfg(feature = "diagnostics")]
+        crate::prepstat::begin();
+        #[cfg(feature = "diagnostics")]
+        use crate::prepstat::{Phase, phase_begins, phase_ends};
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::Submissions, 1);
         let mut lists: Vec<Option<ID3D12CommandList>> = Vec::with_capacity(2 * runs.len());
@@ -5465,6 +5482,8 @@ impl Host {
         let mut settled = std::time::Duration::ZERO;
         // One write-watch asking for everything the submission refreshes
         // (`VICTORY_ASK_ONCE`): per copy, the span of its refreshed ranges.
+        #[cfg(feature = "diagnostics")]
+        let (phase, settled_before) = (phase_begins(Phase::AskOnce), settled);
         if crate::watch::once() {
             let mut spans: std::collections::HashMap<usize, (usize, usize)> = std::collections::HashMap::new();
             for list in runs {
@@ -5496,6 +5515,8 @@ impl Host {
             self.settle(&mut submitted, WHY_STALE);
             settled += settling.elapsed();
         }
+        #[cfg(feature = "diagnostics")]
+        phase_ends(Phase::AskOnce, phase, settled - settled_before);
         let parallel = parallel_preludes(runs);
         let mut plans = Vec::new();
         let mut texture_uploads = Vec::new();
@@ -5503,7 +5524,13 @@ impl Host {
         let mut seen_preludes = std::collections::HashSet::new();
         let mut sparse_limit = None;
         for list in runs {
+            #[cfg(feature = "diagnostics")]
+            let phase = phase_begins(Phase::Deferred);
             let mut uploads = list.run_deferred(&mut batch);
+            #[cfg(feature = "diagnostics")]
+            phase_ends(Phase::Deferred, phase, std::time::Duration::ZERO);
+            #[cfg(feature = "diagnostics")]
+            let phase = phase_begins(Phase::Sparse);
             uploads.retain_mut(|upload| {
                 if upload.texture.sparse.is_none() {
                     return true;
@@ -5511,6 +5538,10 @@ impl Host {
                 let limit = *sparse_limit.get_or_insert_with(|| upload.sparse_limit(self.video_memory()));
                 upload.prepare_sparse(&self.device, &self.queue, limit)
             });
+            #[cfg(feature = "diagnostics")]
+            phase_ends(Phase::Sparse, phase, std::time::Duration::ZERO);
+            #[cfg(feature = "diagnostics")]
+            let phase = phase_begins(Phase::Prelude);
             firsts.push(lists.len());
             let key = std::ptr::from_ref(*list);
             let replay = seen_preludes.contains(&key);
@@ -5528,25 +5559,43 @@ impl Host {
                 }
             }
             lists.push(list.list.cast().ok());
+            #[cfg(feature = "diagnostics")]
+            phase_ends(Phase::Prelude, phase, std::time::Duration::ZERO);
         }
         // Only the recording runs concurrently. The GPU receives the
         // original ordered list array, after every worker has closed its list.
+        #[cfg(feature = "diagnostics")]
+        let phase = phase_begins(Phase::RecordPreludes);
         record_preludes(plans);
+        #[cfg(feature = "diagnostics")]
+        phase_ends(Phase::RecordPreludes, phase, std::time::Duration::ZERO);
+        #[cfg(feature = "diagnostics")]
+        let phase = phase_begins(Phase::Flush);
         batch.flush();
+        #[cfg(feature = "diagnostics")]
+        phase_ends(Phase::Flush, phase, std::time::Duration::ZERO);
+        #[cfg(feature = "diagnostics")]
+        let phase = phase_begins(Phase::AskOnceEnd);
         crate::watch::ask_once_end();
+        #[cfg(feature = "diagnostics")]
+        phase_ends(Phase::AskOnceEnd, phase, std::time::Duration::ZERO);
         // The snapshots of the ranges shaders may write, if they were left
         // for now (`crate::shadow::wide_back`): the refreshes are done, the
         // lists have not gone to the card.
         {
             #[cfg(feature = "diagnostics")]
-            let snapshots = std::time::Instant::now();
+            let snapshots = phase_begins(Phase::Snapshots);
             crate::shadow::take_snapshots();
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
+            #[cfg(feature = "diagnostics")]
+            phase_ends(Phase::Snapshots, snapshots, std::time::Duration::ZERO);
         }
         // Copies in the card's memory: what changed on their CPU side goes
         // up ahead of the lists, and a compare of what the shaders may
         // write follows them in the same submission.
+        #[cfg(feature = "diagnostics")]
+        let (phase, settled_before) = (phase_begins(Phase::CardBefore), settled);
         let flown = late && relay();
         if flown && self.card_results_low() {
             let settling = std::time::Instant::now();
@@ -5557,6 +5606,8 @@ impl Host {
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             lists.push(Some(check));
         }
+        #[cfg(feature = "diagnostics")]
+        phase_ends(Phase::CardBefore, phase, settled - settled_before);
         let prepared = std::time::Instant::now();
         if late {
             *submitted += 1;
@@ -5592,6 +5643,8 @@ impl Host {
             crate::texback::add_destination_aliases(&mut texture_writes);
             let writes = runs.iter().flat_map(|l| l.deferred().writes.clone()).collect();
             SUBMISSION_US[0].fetch_add((prepared - started).saturating_sub(settled).as_micros() as u64, Ordering::Relaxed);
+            #[cfg(feature = "diagnostics")]
+            crate::prepstat::end((prepared - started).saturating_sub(settled));
             submitting(0, 0);
             #[cfg(feature = "diagnostics")]
             crate::copystat::submission_ends(lock);
@@ -5682,6 +5735,8 @@ impl Host {
         let gpu = prepared.elapsed();
         SUBMISSION_US[0].fetch_add((prepared - started).as_micros() as u64, Ordering::Relaxed);
         SUBMISSION_US[1].fetch_add(gpu.as_micros() as u64, Ordering::Relaxed);
+        #[cfg(feature = "diagnostics")]
+        crate::prepstat::end(prepared - started);
         #[cfg(feature = "diagnostics")]
         crate::copystat::card_waited(gpu.as_micros() as u64, || {
             let pipelines: std::collections::BTreeSet<String> = runs
@@ -6859,6 +6914,21 @@ impl HostList {
         let mut uploads = Vec::new();
         for step in &self.deferred().copies {
             let started = std::time::Instant::now();
+            // Each kind of step timed (PR PREP-0); refresh steps are only
+            // noted for the flush, left as the rest of the deferred steps.
+            #[cfg(feature = "diagnostics")]
+            let _step = {
+                use crate::prepstat::Part;
+                let part = match step {
+                    Step::Copy(..) => Some(Part::StepCopy),
+                    Step::Fill(_) | Step::Fills(_) => Some(Part::StepFill),
+                    Step::Refresh(..) => None,
+                    Step::Run(_) | Step::Host(_) => Some(Part::StepWork),
+                    Step::GpuWrite(..) => Some(Part::StepGpuWrite),
+                    Step::Texture { .. } | Step::SampledTexture(..) | Step::AheadTexture(..) => Some(Part::StepTexture),
+                };
+                part.map(|p| crate::prepstat::StepTimer::new(p, started))
+            };
             let copied = match step {
                 &Step::Copy(dst, src, len) => {
                     #[cfg(feature = "diagnostics")]
@@ -7225,6 +7295,8 @@ impl Batch {
     fn update(shadow: &crate::shadow::Shadow, from: usize, to: usize) {
         let started = std::time::Instant::now();
         let copied = shadow.update(from, to - from);
+        #[cfg(feature = "diagnostics")]
+        crate::prepstat::part_since(crate::prepstat::Part::Updates, started);
         let us = started.elapsed().as_micros() as u64;
         #[cfg(feature = "diagnostics")]
         crate::copystat::range(from, to - from, us, 0);
@@ -7254,6 +7326,8 @@ impl Batch {
             let started = std::time::Instant::now();
             let ranges = self.refreshes.iter().filter(|r| !r.0.unwatched()).map(|r| (r.1, r.2));
             crate::watch::ask_ahead(ranges);
+            #[cfg(feature = "diagnostics")]
+            crate::prepstat::part_since(crate::prepstat::Part::AskAhead, started);
             PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
         if wide_refresh() && self.refreshes.len() >= 4 {
@@ -7276,7 +7350,11 @@ impl Batch {
             }
         }
         if ahead {
+            #[cfg(feature = "diagnostics")]
+            let started = std::time::Instant::now();
             crate::watch::ask_ahead_done();
+            #[cfg(feature = "diagnostics")]
+            crate::prepstat::part_since(crate::prepstat::Part::AskAhead, started);
         }
     }
 }

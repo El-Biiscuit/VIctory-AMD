@@ -221,6 +221,36 @@ These two are totals since the previous line, not per frame. In steady play they
 - Measured outside Windows, in a Linux virtual machine: about 125 ns per take and release, most of it the clock. The test `lockstat::tests::counting_costs_little` prints the figure on any machine with `-- --nocapture`.
 - `VICTORY_LOCK_STATS=0` turns this counting off. `VICTORY_PROTECT_STATS=0` turns off the `protect.*` counting. The two switches are independent.
 
+## Submission preparation by step (`prep.*`, PR PREP-0)
+
+`frame.cpu_ms` ("preparing" on the frame line) adds up, per submission, the time from `started` to `prepared` in `Host::submit_part`, on the submitting thread, without the settles inside it. Diagnostics builds time the steps of that same window (`crate::prepstat`), line `submission preparing per frame on the submitting thread (timed as frame.cpu_ms)`:
+
+| Step (in order) | Key | What it is |
+| --- | --- | --- |
+| Asking once | `prep.ask_once_ms` | One write-watch asking for every refreshed range (`VICTORY_ASK_ONCE`); its settles left out |
+| Deferred steps | `prep.deferred_ms` | Each list's `run_deferred` |
+| Sparse textures | `prep.sparse_ms` | Sparse textures readied for their uploads |
+| Preludes planned | `prep.prelude_ms` | Each list's prelude planned (and recorded when not in parallel) |
+| Preludes recorded | `prep.record_preludes_ms` | `record_preludes` |
+| Last flush | `prep.flush_ms` | The refreshes still pending (`Batch::flush`) |
+| End of the asking | `prep.ask_once_end_ms` | `watch::ask_once_end` |
+| Snapshots | `prep.snapshots_ms` | `shadow::take_snapshots`: copies of the ranges shaders may write, for the compare after the submission |
+| Card copies | `prep.card_before_ms` | `card_before`: what goes up to copies in the card's memory, and the compare after the lists; its settle left out |
+| The rest | `prep.rest_ms` | Per submission, its time less its steps, worked out **before** anything is summed |
+
+Parts timed inside a step are part of its time, never added again:
+- in the deferred steps, by kind: title copies (`step_copy_ms`), fills (`step_fill_ms`), title and host work (`step_work_ms`), ranges shaders write (`step_gpu_write_ms`: the copy's refresh first, then the snapshot noted), textures (`step_texture_ms`), and what is left (`step_rest_ms`: refresh steps only noted for the flush, and the loop). Across those kinds: host copy refreshes done (`step_updates_ms`) and write-watch askings ahead (`step_ask_ahead_ms`), triggered by a step that writes title memory or gives shaders a range;
+- in the last flush: refreshes done (`flush_updates_ms`) and askings ahead (`flush_ask_ahead_ms`);
+- in the snapshots: taking the noted list (`snap_take_ms`), cutting it into jobs (`snap_jobs_ms`), queueing them for the kept threads (`snap_queue_ms`), the submitting thread copying its share (`snap_own_ms`), waiting for the kept threads to finish (`snap_wait_ms`), and other (`snap_other_ms`); `snap_mb` and `snap_jobs` are what was copied.
+
+**How it ties to `frame.cpu_ms`.**
+- Per submission, the steps and the rest add up to exactly the value added to `frame.cpu_ms`: the same expression, in the same two places. `prep.sum_gap_ms` (derived: total less steps and rest) is only the rounding of the printed values.
+- A step can overrun its submission by the gap between clock readings; `prep.over` counts the submissions where that is over 0.1 ms. It should be 0.
+- `prep.total_ms` covers each copystat window of about 5 s; `frame.cpu_ms` covers the last second of each frame-rate line. Compare their medians over many windows, not one window with one line. `summary` sets both side by side.
+- `prep.sweep_ms` and `prep.waiting_slots_ms` are on the submitting thread with the submission lock held, but **before** the timed window: they are not in `frame.cpu_ms`.
+
+**Cost and switch.** Two clock readings per step (one per deferred step of a timed kind, none for refresh steps), thread-local until the submission ends, then atomic adds. No allocation, sort or log while a submission is prepared. `VICTORY_PREP_STATS=0` turns it off.
+
 ## Steady periods and bursts (`cargo xtask perf-log regimes`)
 
 `cargo xtask perf-log regimes <logs> [--burst-key KEY] [--burst-min X]` splits the selected copystat windows in two:
@@ -250,6 +280,7 @@ A correlation does not say which way the cause runs. Read it together with the t
 | `d3d.<queue>.*`, `joins.*`, `texrefresh.*`, `fills.*`, `card_passes.*`, `slow_watch.*` | per-tick lines | `host.rs`, `Meter::frame` |
 | `copies.*`, `recording.*`, `account.*`, `whole.*`, `card_wait.*`, `heap.*`, `barrier_waits.*` | copystat lines | `copystat.rs`, `log` |
 | `lock_guards.*`, `lock_jv.*`, `lock_roles.*`, `lock_kinds.*`, `lock_extra.*` | `GUARDS lock per frame`, `JOURNAL and VIEWS locks per frame`, `lock time per frame by thread`, `lock time per frame by kind of other thread`, `guard lock around checks and faults per frame` | `copystat.rs`, `log_locks` (counted in `lockstat.rs`) |
+| `prep.*` | `submission preparing per frame on the submitting thread (timed as frame.cpu_ms)` | `copystat.rs`, `log_preparing` (timed in `prepstat.rs`, `host.rs`, `shadow.rs`) |
 | `protect.*`, `guard_waits.*` | `guard protection changes per frame (VirtualProtect)`, `guard waits per frame` | `copystat.rs`, `log_protections` (counted in `watch.rs`, `stats`) |
 | `vram.*`, `memory.*`, `tex_memory.*`, `let_go.*`, `staging_pool.*`, `budget_change.*` | gauges | `host.rs`, `copystat.rs`, `log_memory` |
 

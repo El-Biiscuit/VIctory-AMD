@@ -388,6 +388,27 @@ impl Summary {
                 100.0 * s / frame
             )),
         );
+        if let Some(prep) = self.median("prep.total_ms") {
+            let _ = writeln!(
+                out,
+                "- CPU preparing by step (PREP-0; copystat windows of about 5 s, where `frame.cpu_ms` covers the last second \
+                 of each frame-rate line): {} ms against `frame.cpu_ms` {} ms. Steps: deferred {} ms, snapshots {} ms, \
+                 last flush {} ms, card copies {} ms, preludes {} + {} ms, asking once {} + {} ms, sparse {} ms; \
+                 the rest {} ms.",
+                num(prep),
+                get("frame.cpu_ms"),
+                get("prep.deferred_ms"),
+                get("prep.snapshots_ms"),
+                get("prep.flush_ms"),
+                get("prep.card_before_ms"),
+                get("prep.prelude_ms"),
+                get("prep.record_preludes_ms"),
+                get("prep.ask_once_ms"),
+                get("prep.ask_once_end_ms"),
+                get("prep.sparse_ms"),
+                get("prep.rest_ms"),
+            );
+        }
         if self.relay {
             let _ = writeln!(
                 out,

@@ -1190,6 +1190,78 @@ fn log_locks(frames: f64) {
     );
 }
 
+/// Logs where submissions' preparation went on the submitting thread
+/// (`crate::prepstat`, PR PREP-0), per frame since the last line: the same
+/// time as `frame.cpu_ms`, by step, and the rest worked out per
+/// submission. Parts inside a step are part of its time.
+fn log_preparing(frames: f64) {
+    use crate::prepstat::{
+        LONGEST_NS, OVER, OVER_NS, Part, Phase, REST_NS, SNAP_BYTES, SNAP_JOBS, SUBMISSIONS, SWEEP_NS, TOTAL_NS,
+        WAITING_SLOTS_NS,
+    };
+    if !crate::prepstat::on() {
+        return;
+    }
+    let t = crate::prepstat::take();
+    let per = |n: u64| n as f64 / frames;
+    let ms = |ns: u64| ns as f64 / 1e6 / frames;
+    let phase = |p: Phase| t.phases[p as usize];
+    let part = |p: Phase, q: Part| t.parts[p as usize][q as usize];
+    let deferred = phase(Phase::Deferred);
+    let kinds = [Part::StepCopy, Part::StepFill, Part::StepWork, Part::StepGpuWrite, Part::StepTexture]
+        .map(|q| part(Phase::Deferred, q));
+    let snapshots = phase(Phase::Snapshots);
+    let snap_parts = [Part::SnapTake, Part::SnapJobs, Part::SnapQueue, Part::SnapOwn, Part::SnapWait]
+        .map(|q| part(Phase::Snapshots, q));
+    tracing::info!(
+        "submission preparing per frame on the submitting thread (timed as frame.cpu_ms): {:.1} submissions, {:.2} ms \
+         (longest {:.2} ms); asking once {:.2} ms; deferred steps {:.2} ms (title copies {:.2} ms, fills {:.2} ms, title \
+         and host work {:.2} ms, ranges shaders write {:.2} ms, textures {:.2} ms, refresh steps noted and the loop \
+         {:.2} ms; inside them refreshes done {:.2} ms and write-watch askings ahead {:.2} ms); sparse textures {:.2} \
+         ms; preludes planned {:.2} ms; preludes recorded in parallel {:.2} ms; last flush {:.2} ms (refreshes done \
+         {:.2} ms, write-watch askings ahead {:.2} ms); end of the asking once {:.2} ms; snapshots {:.2} ms (taking the \
+         list {:.2} ms, cutting jobs {:.2} ms, queueing {:.2} ms, this thread copying {:.2} ms, waiting for the kept \
+         threads {:.2} ms, other {:.2} ms; {:.1} MB in {:.0} jobs); copies in the card's memory {:.2} ms; the rest \
+         {:.2} ms; steps over their submission {:.1} times ({:.2} ms); before the timed time: sweep {:.2} ms, waiting \
+         slots made {:.2} ms",
+        per(t.sums[SUBMISSIONS]),
+        ms(t.sums[TOTAL_NS]),
+        t.sums[LONGEST_NS] as f64 / 1e6,
+        ms(phase(Phase::AskOnce)),
+        ms(deferred),
+        ms(kinds[0]),
+        ms(kinds[1]),
+        ms(kinds[2]),
+        ms(kinds[3]),
+        ms(kinds[4]),
+        ms(deferred.saturating_sub(kinds.iter().sum())),
+        ms(part(Phase::Deferred, Part::Updates)),
+        ms(part(Phase::Deferred, Part::AskAhead)),
+        ms(phase(Phase::Sparse)),
+        ms(phase(Phase::Prelude)),
+        ms(phase(Phase::RecordPreludes)),
+        ms(phase(Phase::Flush)),
+        ms(part(Phase::Flush, Part::Updates)),
+        ms(part(Phase::Flush, Part::AskAhead)),
+        ms(phase(Phase::AskOnceEnd)),
+        ms(snapshots),
+        ms(snap_parts[0]),
+        ms(snap_parts[1]),
+        ms(snap_parts[2]),
+        ms(snap_parts[3]),
+        ms(snap_parts[4]),
+        ms(snapshots.saturating_sub(snap_parts.iter().sum())),
+        per(t.counts[SNAP_BYTES]) / 1e6,
+        per(t.counts[SNAP_JOBS]),
+        ms(phase(Phase::CardBefore)),
+        ms(t.sums[REST_NS]),
+        per(t.sums[OVER]),
+        ms(t.sums[OVER_NS]),
+        ms(t.sums[SWEEP_NS]),
+        ms(t.sums[WAITING_SLOTS_NS]),
+    );
+}
+
 /// Microseconds since the first call.
 fn now_us() -> u64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -1451,6 +1523,7 @@ pub(crate) fn log(frames: f64) {
     );
     log_protections(frames);
     log_locks(frames);
+    log_preparing(frames);
     let [together, written, mapped] =
         [0, 1, 2].map(|n| crate::watch::ALIASES[n].load(std::sync::atomic::Ordering::Relaxed));
     tracing::info!(
