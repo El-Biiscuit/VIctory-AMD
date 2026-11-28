@@ -305,6 +305,9 @@ pub enum Timing {
     Gauge,
     /// A total since the start: its change over the selection matters.
     Cumulative,
+    /// Partly on the relay's thread, partly on the submitting thread; the
+    /// derived `_relay_` and `_sync_` metrics split it.
+    Mixed,
 }
 
 impl Timing {
@@ -318,6 +321,7 @@ impl Timing {
             Timing::Volume => "volume",
             Timing::Gauge => "gauge",
             Timing::Cumulative => "cumulative",
+            Timing::Mixed => "mixed",
         }
     }
 }
@@ -348,7 +352,7 @@ const fn m(key: &'static str, label: &'static str, timing: Timing, better: Bette
 }
 
 use Better::{Higher, Lower, Neither};
-use Timing::{Concurrent, CopyBack, Cumulative, Gauge, SubmitPath, ThreadSum, Volume, Wall};
+use Timing::{Concurrent, CopyBack, Cumulative, Gauge, Mixed, SubmitPath, ThreadSum, Volume, Wall};
 
 /// Labels and kinds of the metrics the reports name. Keys not listed here
 /// still appear in the full tables, with their unit read from their name.
@@ -525,12 +529,29 @@ pub const META: &[Meta] = &[
         Volume,
         Lower,
     ),
-    // With the relay these waits are its own (`relay.fetch_wait_ms` counts
-    // the same ones); without it they are on the submitting thread.
+    // `CARD_STATS[6]` gets the fetch waits of `Host::relay_card_back` (the
+    // relay's thread; `RELAY_STATS[3]`, i.e. `relay.fetch_wait_ms`, gets the
+    // same microseconds) and of `Host::card_back` (the submitting thread:
+    // synchronous submissions, and settles without the relay). Without the
+    // relay it is all the submitting thread's; with it the derived metrics
+    // below split it. Either way it is part of the copy back, not of the
+    // fence waits (`frame.gpu_ms` is taken before it).
     m(
         "card.extra_wait_ms",
-        "Waits for card copy fetches",
-        CopyBack,
+        "Waits for card copy fetches (all threads)",
+        Mixed,
+        Lower,
+    ),
+    m(
+        "card.extra_wait_relay_ms",
+        "  of them on the relay thread (derived: = relay.fetch_wait_ms)",
+        Concurrent,
+        Lower,
+    ),
+    m(
+        "card.extra_wait_sync_ms",
+        "  of them on the submitting thread (derived)",
+        SubmitPath,
         Lower,
     ),
     m("copies.refreshes", "Host copy refresh steps", Volume, Lower),
@@ -986,7 +1007,8 @@ pub const COSTS: &[(&str, Option<&str>)] = &[
     ("texrefresh.all_ms", None),
     ("heap.buffer_refresh_ms", None),
     ("heap.texture_stage_ms", None),
-    ("card.extra_wait_ms", Some("frame.back_ms")),
+    ("card.extra_wait_relay_ms", Some("frame.back_ms")),
+    ("card.extra_wait_sync_ms", Some("frame.back_ms")),
 ];
 
 /// The metrics of the headline tables, in order, by section.
@@ -1055,6 +1077,8 @@ pub const SECTIONS: &[(&str, &[&str])] = &[
             "card.fetched_mb",
             "card.readback_copies",
             "card.extra_wait_ms",
+            "card.extra_wait_relay_ms",
+            "card.extra_wait_sync_ms",
             "relay.fetch_wait_ms",
             "relay.landing_ms",
         ],
@@ -1179,6 +1203,8 @@ mod tests {
             "copies.changed_mb",
             "copies.unchanged_pct",
             "vram.local_used_pct",
+            "card.extra_wait_relay_ms",
+            "card.extra_wait_sync_ms",
         ];
         let mut known: Vec<String> = derived.iter().map(|s| (*s).to_owned()).collect();
         for e in ENTRIES {

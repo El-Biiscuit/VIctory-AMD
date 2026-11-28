@@ -328,11 +328,31 @@ fn derive(run: &mut Run) {
             s.values
                 .insert("frame.cpu_other_ms".into(), (cpu - copy - tex).max(0.0));
         }
+        // The card copy fetch waits: with the relay, those of its thread
+        // are counted twice (`card.extra_wait_ms` and `relay.fetch_wait_ms`,
+        // the same microseconds); the rest is the submitting thread's
+        // (`Host::card_back`, synchronous submissions). The two counters
+        // are taken a few microseconds apart in a tick, so the relay's part
+        // is capped at the total.
+        if let Some(all) = s.get("card.extra_wait_ms") {
+            let relayed = if relay {
+                s.get("relay.fetch_wait_ms").unwrap_or(0.0).min(all)
+            } else {
+                0.0
+            };
+            if relay {
+                s.values.insert("card.extra_wait_relay_ms".into(), relayed);
+            }
+            s.values
+                .insert("card.extra_wait_sync_ms".into(), (all - relayed).max(0.0));
+        }
         if let (Some(cpu), Some(gpu)) = (s.get("frame.cpu_ms"), s.get("frame.gpu_ms")) {
             // With the relay the copy back runs on its own thread, beside
-            // the submitting thread: it is not part of this path.
+            // the submitting thread: only the part known to be the
+            // submitting thread's (its card copy fetch waits) is on this
+            // path. Without it the whole copy back is.
             let back = if relay {
-                0.0
+                s.get("card.extra_wait_sync_ms").unwrap_or(0.0)
             } else {
                 s.get("frame.back_ms").unwrap_or(0.0)
             };

@@ -169,11 +169,7 @@ fn cost_rows(metrics: &BTreeMap<String, Stats>, relay: bool) -> Vec<CostRow> {
             let s = metrics[*key];
             let leaf = !COSTS.iter().any(|(k, p)| *p == Some(*key) && has(k));
             let timing = catalog::timing(key, catalog::scope_of(key));
-            let nature = match timing {
-                Timing::CopyBack if relay => "concurrent (relay thread)".to_owned(),
-                Timing::CopyBack => "submit-path".to_owned(),
-                t => t.name().to_owned(),
-            };
+            let nature = nature(timing, relay).to_owned();
             CostRow {
                 key: (*key).to_owned(),
                 parent: parent.map(str::to_owned),
@@ -338,12 +334,20 @@ fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-fn timing_label(key: &str, relay: bool) -> String {
-    match catalog::timing(key, catalog::scope_of(key)) {
-        Timing::CopyBack if relay => "concurrent (relay)".to_owned(),
-        Timing::CopyBack => "submit-path".to_owned(),
-        t => t.name().to_owned(),
+/// How a cost of `timing` relates to the frame, given the relay's state.
+pub fn nature(timing: Timing, relay: bool) -> &'static str {
+    match timing {
+        Timing::CopyBack if relay => "concurrent (relay thread)",
+        Timing::Concurrent => "concurrent (relay thread)",
+        Timing::CopyBack => "submit-path",
+        Timing::Mixed if relay => "mixed (relay thread + submitting thread)",
+        Timing::Mixed => "submit-path",
+        t => t.name(),
     }
+}
+
+fn timing_label(key: &str, relay: bool) -> String {
+    nature(catalog::timing(key, catalog::scope_of(key)), relay).to_owned()
 }
 
 impl Summary {
@@ -370,7 +374,14 @@ impl Summary {
             "- Sequential on the submitting thread (submission lock held): CPU preparing {} ms + waiting for the card {} ms{} = {} ms{}.",
             get("frame.cpu_ms"),
             get("frame.gpu_ms"),
-            if self.relay { "" } else { " + copy back" },
+            if self.relay {
+                format!(
+                    " + card copy fetch waits of synchronous submissions {} ms",
+                    get("card.extra_wait_sync_ms")
+                )
+            } else {
+                " + copy back".to_owned()
+            },
             submit.map_or("-".into(), num),
             submit.map_or(String::new(), |s| format!(
                 ", {:.0}% of the frame",
@@ -381,9 +392,13 @@ impl Summary {
             let _ = writeln!(
                 out,
                 "- Concurrent, on the relay thread: copy back {} ms (`VICTORY_RELAY` on). It overlaps the line above and is not added to it; \
-                 the submitting thread waits for it only through settles ({} ms of fence waits in settles).",
+                 the submitting thread waits for it only through settles ({} ms of fence waits in settles). \
+                 The figure also holds the copy back of synchronous submissions, done on the submitting thread: \
+                 of the card copy fetch waits, {} ms were the relay thread's and {} ms the submitting thread's.",
                 get("frame.back_ms"),
                 get("late.wait_ms"),
+                get("card.extra_wait_relay_ms"),
+                get("card.extra_wait_sync_ms"),
             );
         } else {
             let _ = writeln!(

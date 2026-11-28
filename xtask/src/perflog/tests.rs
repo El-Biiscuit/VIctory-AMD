@@ -19,6 +19,9 @@ struct Spec {
     texture_ms: f64,
     gpu_ms: f64,
     back_ms: f64,
+    /// `card.extra_wait_ms`, and the relay's `fetch_wait_ms`.
+    card_wait_ms: f64,
+    relay_fetch_ms: f64,
     relay: bool,
     presents: bool,
     ansi: bool,
@@ -36,6 +39,8 @@ impl Default for Spec {
             texture_ms: 30.0,
             gpu_ms: 24.8,
             back_ms: 133.6,
+            card_wait_ms: 2.0,
+            relay_fetch_ms: 2.5,
             relay: true,
             presents: false,
             ansi: false,
@@ -111,10 +116,10 @@ fn synthetic(spec: &Spec) -> String {
                 "victory_gpu::host",
                 format!(
                     "the relay per frame (VICTORY_RELAY=1): 12.0 flights landed in 6.0 landings by the thread that copies back, \
-                 beside the submitting thread; that thread waited 30.0 ms for the card with nothing to land and 2.5 ms for \
+                 beside the submitting thread; that thread waited 30.0 ms for the card with nothing to land and {:.1} ms for \
                  fetches of card copies' pieces, and was {:.1} ms landing in all (the frame line's \"copying back\" is its time; \
                  \"settles\" above are waits of other threads for it)",
-                    spec.back_ms
+                    spec.relay_fetch_ms, spec.back_ms
                 ),
             );
         }
@@ -141,9 +146,16 @@ fn synthetic(spec: &Spec) -> String {
             continue;
         }
         line(t, "victory_gpu::host", "write-watch askings of a millisecond or more: 2.0 a frame, 4.0 ms a frame; the longest asking 3.0 ms".into());
-        line(t, "victory_gpu::host", "host copies in the card's memory: 10 copies 494 MB, their bytes from before 300 MB; per frame: \
-             12.5 MB sent up in 40 ranges, 900 pieces compared on the card, 7 dirty ranges fetched (3.5 MB) with 1.0 more waits for the card (2.0 ms), \
-             7 readback copy commands; relay joined 2 dirty ranges and avoided 0.50 MB of overlapping reads".into());
+        line(
+            t,
+            "victory_gpu::host",
+            format!(
+                "host copies in the card's memory: 10 copies 494 MB, their bytes from before 300 MB; per frame: \
+             12.5 MB sent up in 40 ranges, 900 pieces compared on the card, 7 dirty ranges fetched (3.5 MB) with 1.0 more waits for the card ({:.1} ms), \
+             7 readback copy commands; relay joined 2 dirty ranges and avoided 0.50 MB of overlapping reads",
+                spec.card_wait_ms
+            ),
+        );
         line(
             t,
             "victory_gpu::host",
@@ -663,4 +675,77 @@ fn write_synthetic_logs() {
     };
     std::fs::write(dir.join("before.log"), synthetic(&before)).unwrap();
     std::fs::write(dir.join("after.log"), synthetic(&after)).unwrap();
+}
+
+/// `card.extra_wait_ms` (`CARD_STATS[6]`) gets the relay thread's fetch
+/// waits (`Host::relay_card_back`, counted in `relay.fetch_wait_ms` too)
+/// and the submitting thread's (`Host::card_back`). With the relay only the
+/// rest beyond the relay's part is sequential; without it all of it is.
+#[test]
+fn card_fetch_waits_are_split_by_thread() {
+    // The real run's medians: 47.0 ms in all, 46.7 ms on the relay thread.
+    let spec = Spec {
+        card_wait_ms: 47.0,
+        relay_fetch_ms: 46.7,
+        frame_ms: |_| 267.9,
+        ..Spec::default()
+    };
+    let s = summary_of(&synthetic(&spec), &Selection::default());
+    let get = |k: &str| s.metrics[k].median;
+    assert!((get("card.extra_wait_relay_ms") - 46.7).abs() < 1e-9);
+    assert!((get("card.extra_wait_sync_ms") - 0.3).abs() < 1e-9);
+    // Only the submitting thread's part joins the sequential path.
+    assert!((get("frame.submit_path_ms") - (147.1 + 24.8 + 0.3)).abs() < 1e-9);
+    let nature = |k: &str| {
+        s.costs
+            .iter()
+            .find(|c| c.key == k)
+            .map(|c| c.nature.clone())
+    };
+    assert_eq!(
+        nature("card.extra_wait_relay_ms").as_deref(),
+        Some("concurrent (relay thread)")
+    );
+    assert_eq!(
+        nature("card.extra_wait_sync_ms").as_deref(),
+        Some("submit-path")
+    );
+    // The total is not ranked (its parts are), and is labelled mixed.
+    assert_eq!(nature("card.extra_wait_ms"), None);
+    assert!(
+        s.markdown(false, 8)
+            .contains("| `card.extra_wait_ms` | ms | mixed (relay thread + submitting thread) |")
+            || s.markdown(false, 8)
+                .contains("`card.extra_wait_ms` | ms | mixed (relay thread + submitting thread)")
+    );
+    // The relay's two counters are taken a moment apart: its part is
+    // capped at the total, never negative on the other side.
+    let skewed = Spec {
+        card_wait_ms: 10.0,
+        relay_fetch_ms: 10.4,
+        ..Spec::default()
+    };
+    let s = summary_of(&synthetic(&skewed), &Selection::default());
+    assert_eq!(s.metrics["card.extra_wait_relay_ms"].median, 10.0);
+    assert_eq!(s.metrics["card.extra_wait_sync_ms"].median, 0.0);
+
+    // Without the relay every fetch wait is the submitting thread's.
+    let sync = Spec {
+        card_wait_ms: 47.0,
+        relay: false,
+        ..Spec::default()
+    };
+    let s = summary_of(&synthetic(&sync), &Selection::default());
+    assert!(!s.metrics.contains_key("card.extra_wait_relay_ms"));
+    assert_eq!(s.metrics["card.extra_wait_sync_ms"].median, 47.0);
+    let total = s
+        .costs
+        .iter()
+        .find(|c| c.key == "card.extra_wait_sync_ms")
+        .unwrap();
+    assert_eq!(total.nature, "submit-path");
+    assert!(
+        s.markdown(false, 8)
+            .contains("`card.extra_wait_ms` | ms | submit-path |")
+    );
 }
