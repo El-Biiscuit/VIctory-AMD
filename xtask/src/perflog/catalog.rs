@@ -214,6 +214,68 @@ pub const ENTRIES: &[Entry] = &[
                   guarded in {check_calls} calls, {check_joined} if runs with only guarded blocks between them were joined",
     },
     Entry {
+        id: "lock_guards",
+        scope: Scope::Copy,
+        pattern: "GUARDS lock per frame: checks {check_taken} taken, {check_wait_ms} ms waiting (longest {check_wait_max_ms} ms, \
+                  {check_waits_long} over 0.1 ms), {check_hold_ms} ms held (longest {check_hold_max_ms} ms, {check_holds_long} \
+                  over 0.1 ms, {check_holds_vlong} over 1 ms); looks before checks {known_taken} taken, {known_wait_ms} ms \
+                  waiting (longest {known_wait_max_ms} ms, {known_waits_long} over 0.1 ms), {known_hold_ms} ms held (longest \
+                  {known_hold_max_ms} ms, {known_holds_long} over 0.1 ms, {known_holds_vlong} over 1 ms); write faults \
+                  {fault_taken} taken, {fault_wait_ms} ms waiting (longest {fault_wait_max_ms} ms, {fault_waits_long} over 0.1 \
+                  ms), {fault_hold_ms} ms held (longest {fault_hold_max_ms} ms, {fault_holds_long} over 0.1 ms, \
+                  {fault_holds_vlong} over 1 ms); writes told {write_taken} taken, {write_wait_ms} ms waiting (longest \
+                  {write_wait_max_ms} ms, {write_waits_long} over 0.1 ms), {write_hold_ms} ms held (longest {write_hold_max_ms} \
+                  ms, {write_holds_long} over 0.1 ms, {write_holds_vlong} over 1 ms); views mapped {mapped_taken} taken, \
+                  {mapped_wait_ms} ms waiting (longest {mapped_wait_max_ms} ms, {mapped_waits_long} over 0.1 ms), \
+                  {mapped_hold_ms} ms held (longest {mapped_hold_max_ms} ms, {mapped_holds_long} over 0.1 ms, \
+                  {mapped_holds_vlong} over 1 ms); remaps {remap_taken} taken, {remap_wait_ms} ms waiting (longest \
+                  {remap_wait_max_ms} ms, {remap_waits_long} over 0.1 ms), {remap_hold_ms} ms held (longest {remap_hold_max_ms} \
+                  ms, {remap_holds_long} over 0.1 ms, {remap_holds_vlong} over 1 ms); {queue_mean} threads already waiting on \
+                  average when taken, {queue_max} at most",
+    },
+    Entry {
+        id: "lock_jv",
+        scope: Scope::Copy,
+        pattern: "JOURNAL and VIEWS locks per frame: JOURNAL by write-watch askings and guard checks {jw_taken} taken, \
+                  {jw_wait_ms} ms waiting (longest {jw_wait_max_ms} ms, {jw_waits_long} over 0.1 ms), {jw_hold_ms} ms held \
+                  (longest {jw_hold_max_ms} ms, {jw_holds_long} over 0.1 ms, {jw_holds_vlong} over 1 ms); JOURNAL by looks at \
+                  askings ahead {ja_taken} taken, {ja_wait_ms} ms waiting (longest {ja_wait_max_ms} ms, {ja_waits_long} over 0.1 \
+                  ms), {ja_hold_ms} ms held (longest {ja_hold_max_ms} ms, {ja_holds_long} over 0.1 ms, {ja_holds_vlong} over 1 \
+                  ms); JOURNAL by askings ahead {jk_taken} taken, {jk_wait_ms} ms waiting (longest {jk_wait_max_ms} ms, \
+                  {jk_waits_long} over 0.1 ms), {jk_hold_ms} ms held (longest {jk_hold_max_ms} ms, {jk_holds_long} over 0.1 ms, \
+                  {jk_holds_vlong} over 1 ms); JOURNAL otherwise {jo_taken} taken, {jo_wait_ms} ms waiting (longest \
+                  {jo_wait_max_ms} ms, {jo_waits_long} over 0.1 ms), {jo_hold_ms} ms held (longest {jo_hold_max_ms} ms, \
+                  {jo_holds_long} over 0.1 ms, {jo_holds_vlong} over 1 ms); VIEWS with GUARDS held {vg_taken} taken, \
+                  {vg_wait_ms} ms waiting (longest {vg_wait_max_ms} ms, {vg_waits_long} over 0.1 ms), {vg_hold_ms} ms held \
+                  (longest {vg_hold_max_ms} ms, {vg_holds_long} over 0.1 ms, {vg_holds_vlong} over 1 ms); VIEWS otherwise \
+                  {vo_taken} taken, {vo_wait_ms} ms waiting (longest {vo_wait_max_ms} ms, {vo_waits_long} over 0.1 ms), \
+                  {vo_hold_ms} ms held (longest {vo_hold_max_ms} ms, {vo_holds_long} over 0.1 ms, {vo_holds_vlong} over 1 ms); \
+                  JOURNAL {j_queue_mean} threads already waiting on average when taken, {j_queue_max} at most; VIEWS \
+                  {v_queue_mean}, {v_queue_max} at most",
+    },
+    Entry {
+        id: "lock_roles",
+        scope: Scope::Copy,
+        pattern: "lock time per frame by thread: in submissions GUARDS {sub_guards_wait_ms} ms waiting {sub_guards_hold_ms} ms \
+                  held, JOURNAL {sub_journal_wait_ms} ms waiting {sub_journal_hold_ms} ms held, VIEWS {sub_views_wait_ms} ms \
+                  waiting {sub_views_hold_ms} ms held; title submitting threads outside submissions GUARDS \
+                  {title_guards_wait_ms} ms waiting {title_guards_hold_ms} ms held, JOURNAL {title_journal_wait_ms} ms waiting \
+                  {title_journal_hold_ms} ms held, VIEWS {title_views_wait_ms} ms waiting {title_views_hold_ms} ms held; the \
+                  relay GUARDS {relay_guards_wait_ms} ms waiting {relay_guards_hold_ms} ms held, JOURNAL {relay_journal_wait_ms} \
+                  ms waiting {relay_journal_hold_ms} ms held, VIEWS {relay_views_wait_ms} ms waiting {relay_views_hold_ms} ms \
+                  held; other threads GUARDS {other_guards_wait_ms} ms waiting {other_guards_hold_ms} ms held, JOURNAL \
+                  {other_journal_wait_ms} ms waiting {other_journal_hold_ms} ms held, VIEWS {other_views_wait_ms} ms waiting \
+                  {other_views_hold_ms} ms held",
+    },
+    Entry {
+        id: "lock_extra",
+        scope: Scope::Copy,
+        pattern: "guard lock around checks and faults per frame: {is_view_ms} ms asking whether ranges are views before taking \
+                  the lock, {uncommitted_ms} ms asking about uncommitted blocks holding it; {faults_found_open} write faults \
+                  found their block open already; write faults waited {fault_wait_title_ms} ms on title submitting threads and \
+                  {fault_wait_other_ms} ms on other threads",
+    },
+    Entry {
         id: "whole",
         scope: Scope::Copy,
         pattern: "copied whole (memory not watched): {whole_ms} ms per frame in {ranges} ranges",
@@ -325,6 +387,9 @@ pub enum Timing {
     /// Partly on the relay's thread, partly on the submitting thread; the
     /// derived `_relay_` and `_sync_` metrics split it.
     Mixed,
+    /// On a title thread that submits, outside its submissions: the
+    /// title's render threads, whose stalls delay its next submission.
+    TitleCritical,
 }
 
 impl Timing {
@@ -339,6 +404,7 @@ impl Timing {
             Timing::Gauge => "gauge",
             Timing::Cumulative => "cumulative",
             Timing::Mixed => "mixed",
+            Timing::TitleCritical => "title-critical",
         }
     }
 }
@@ -369,7 +435,10 @@ const fn m(key: &'static str, label: &'static str, timing: Timing, better: Bette
 }
 
 use Better::{Higher, Lower, Neither};
-use Timing::{Concurrent, CopyBack, Cumulative, Gauge, Mixed, SubmitPath, ThreadSum, Volume, Wall};
+use Timing::{
+    Concurrent, CopyBack, Cumulative, Gauge, Mixed, SubmitPath, ThreadSum, TitleCritical, Volume,
+    Wall,
+};
 
 /// Labels and kinds of the metrics the reports name. Keys not listed here
 /// still appear in the full tables, with their unit read from their name.
@@ -814,6 +883,565 @@ pub const META: &[Meta] = &[
         "guard_waits.check_joined",
         "  if runs across guarded blocks were joined",
         Volume,
+        Lower,
+    ),
+    // Lock waits and holds (`crate::lockstat`, copystat window).
+    m(
+        "lock_guards.check_taken",
+        "GUARDS by checks: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_guards.check_wait_ms",
+        "GUARDS by checks: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.check_wait_max_ms",
+        "GUARDS by checks: longest wait in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.check_hold_ms",
+        "GUARDS by checks: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.check_hold_max_ms",
+        "GUARDS by checks: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.check_holds_long",
+        "GUARDS by checks: holds over 0.1 ms",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_guards.known_taken",
+        "GUARDS by looks before checks: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_guards.known_wait_ms",
+        "GUARDS by looks before checks: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.known_wait_max_ms",
+        "GUARDS by looks before checks: longest wait in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.known_hold_ms",
+        "GUARDS by looks before checks: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.known_hold_max_ms",
+        "GUARDS by looks before checks: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.known_holds_long",
+        "GUARDS by looks before checks: holds over 0.1 ms",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_guards.fault_taken",
+        "GUARDS by write faults: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_guards.fault_wait_ms",
+        "GUARDS by write faults: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.fault_wait_max_ms",
+        "GUARDS by write faults: longest wait in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.fault_hold_ms",
+        "GUARDS by write faults: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.fault_hold_max_ms",
+        "GUARDS by write faults: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.fault_holds_long",
+        "GUARDS by write faults: holds over 0.1 ms",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_guards.write_taken",
+        "GUARDS by writes told: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_guards.write_wait_ms",
+        "GUARDS by writes told: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.write_wait_max_ms",
+        "GUARDS by writes told: longest wait in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.write_hold_ms",
+        "GUARDS by writes told: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.write_hold_max_ms",
+        "GUARDS by writes told: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.write_holds_long",
+        "GUARDS by writes told: holds over 0.1 ms",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_guards.mapped_taken",
+        "GUARDS by views mapped: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_guards.mapped_wait_ms",
+        "GUARDS by views mapped: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.mapped_wait_max_ms",
+        "GUARDS by views mapped: longest wait in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.mapped_hold_ms",
+        "GUARDS by views mapped: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.mapped_hold_max_ms",
+        "GUARDS by views mapped: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.mapped_holds_long",
+        "GUARDS by views mapped: holds over 0.1 ms",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_guards.remap_taken",
+        "GUARDS by remaps: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_guards.remap_wait_ms",
+        "GUARDS by remaps: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.remap_wait_max_ms",
+        "GUARDS by remaps: longest wait in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.remap_hold_ms",
+        "GUARDS by remaps: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.remap_hold_max_ms",
+        "GUARDS by remaps: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_guards.remap_holds_long",
+        "GUARDS by remaps: holds over 0.1 ms",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_guards.queue_mean",
+        "GUARDS: threads already waiting when taken (mean)",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_guards.queue_max",
+        "GUARDS: most threads seen waiting",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_jv.jw_taken",
+        "JOURNAL by write-watch askings and checks: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_jv.jw_wait_ms",
+        "JOURNAL by write-watch askings and checks: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.jw_hold_ms",
+        "JOURNAL by write-watch askings and checks: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.jw_hold_max_ms",
+        "JOURNAL by write-watch askings and checks: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.ja_taken",
+        "JOURNAL by looks at askings ahead: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_jv.ja_wait_ms",
+        "JOURNAL by looks at askings ahead: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.ja_hold_ms",
+        "JOURNAL by looks at askings ahead: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.ja_hold_max_ms",
+        "JOURNAL by looks at askings ahead: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.jk_taken",
+        "JOURNAL by askings ahead: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_jv.jk_wait_ms",
+        "JOURNAL by askings ahead: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.jk_hold_ms",
+        "JOURNAL by askings ahead: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.jk_hold_max_ms",
+        "JOURNAL by askings ahead: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.jo_taken",
+        "JOURNAL otherwise: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_jv.jo_wait_ms",
+        "JOURNAL otherwise: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.jo_hold_ms",
+        "JOURNAL otherwise: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.jo_hold_max_ms",
+        "JOURNAL otherwise: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.vg_taken",
+        "VIEWS with GUARDS held: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_jv.vg_wait_ms",
+        "VIEWS with GUARDS held: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.vg_hold_ms",
+        "VIEWS with GUARDS held: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.vg_hold_max_ms",
+        "VIEWS with GUARDS held: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.vo_taken",
+        "VIEWS otherwise: taken",
+        Volume,
+        Neither,
+    ),
+    m(
+        "lock_jv.vo_wait_ms",
+        "VIEWS otherwise: waiting",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.vo_hold_ms",
+        "VIEWS otherwise: held",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.vo_hold_max_ms",
+        "VIEWS otherwise: longest hold in the window",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_jv.j_queue_mean",
+        "JOURNAL: threads already waiting when taken (mean)",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_jv.v_queue_mean",
+        "VIEWS: threads already waiting when taken (mean)",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_roles.sub_guards_wait_ms",
+        "GUARDS waiting, in submissions",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "lock_roles.sub_guards_hold_ms",
+        "GUARDS held, in submissions",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "lock_roles.sub_journal_wait_ms",
+        "JOURNAL waiting, in submissions",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "lock_roles.sub_journal_hold_ms",
+        "JOURNAL held, in submissions",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "lock_roles.sub_views_wait_ms",
+        "VIEWS waiting, in submissions",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "lock_roles.sub_views_hold_ms",
+        "VIEWS held, in submissions",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "lock_roles.title_guards_wait_ms",
+        "GUARDS waiting, title submitting threads outside submissions",
+        TitleCritical,
+        Lower,
+    ),
+    m(
+        "lock_roles.title_guards_hold_ms",
+        "GUARDS held, title submitting threads outside submissions",
+        TitleCritical,
+        Lower,
+    ),
+    m(
+        "lock_roles.title_journal_wait_ms",
+        "JOURNAL waiting, title submitting threads outside submissions",
+        TitleCritical,
+        Lower,
+    ),
+    m(
+        "lock_roles.title_journal_hold_ms",
+        "JOURNAL held, title submitting threads outside submissions",
+        TitleCritical,
+        Lower,
+    ),
+    m(
+        "lock_roles.title_views_wait_ms",
+        "VIEWS waiting, title submitting threads outside submissions",
+        TitleCritical,
+        Lower,
+    ),
+    m(
+        "lock_roles.title_views_hold_ms",
+        "VIEWS held, title submitting threads outside submissions",
+        TitleCritical,
+        Lower,
+    ),
+    m(
+        "lock_roles.relay_guards_wait_ms",
+        "GUARDS waiting, the relay",
+        Concurrent,
+        Lower,
+    ),
+    m(
+        "lock_roles.relay_guards_hold_ms",
+        "GUARDS held, the relay",
+        Concurrent,
+        Lower,
+    ),
+    m(
+        "lock_roles.relay_journal_wait_ms",
+        "JOURNAL waiting, the relay",
+        Concurrent,
+        Lower,
+    ),
+    m(
+        "lock_roles.relay_journal_hold_ms",
+        "JOURNAL held, the relay",
+        Concurrent,
+        Lower,
+    ),
+    m(
+        "lock_roles.relay_views_wait_ms",
+        "VIEWS waiting, the relay",
+        Concurrent,
+        Lower,
+    ),
+    m(
+        "lock_roles.relay_views_hold_ms",
+        "VIEWS held, the relay",
+        Concurrent,
+        Lower,
+    ),
+    m(
+        "lock_roles.other_guards_wait_ms",
+        "GUARDS waiting, other threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_roles.other_guards_hold_ms",
+        "GUARDS held, other threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_roles.other_journal_wait_ms",
+        "JOURNAL waiting, other threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_roles.other_journal_hold_ms",
+        "JOURNAL held, other threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_roles.other_views_wait_ms",
+        "VIEWS waiting, other threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_roles.other_views_hold_ms",
+        "VIEWS held, other threads",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_extra.is_view_ms",
+        "Checks asking whether ranges are views (before the lock)",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_extra.uncommitted_ms",
+        "Checks asking about uncommitted blocks (holding the lock)",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "lock_extra.faults_found_open",
+        "Write faults that found their block open already",
+        Volume,
+        Lower,
+    ),
+    m(
+        "lock_extra.fault_wait_title_ms",
+        "Write faults waiting for GUARDS on title submitting threads",
+        TitleCritical,
+        Lower,
+    ),
+    m(
+        "lock_extra.fault_wait_other_ms",
+        "Write faults waiting for GUARDS on other threads",
+        ThreadSum,
         Lower,
     ),
     m(
@@ -1301,6 +1929,73 @@ pub const SECTIONS: &[(&str, &[&str])] = &[
             "guard_waits.write_lock_ms",
             "guard_waits.check_calls",
             "guard_waits.check_joined",
+        ],
+    ),
+    (
+        "Lock contention (GUARDS, JOURNAL, VIEWS)",
+        &[
+            "lock_guards.check_hold_ms",
+            "lock_guards.check_hold_max_ms",
+            "lock_guards.check_holds_long",
+            "lock_guards.check_wait_ms",
+            "lock_guards.known_taken",
+            "lock_guards.known_wait_ms",
+            "lock_guards.fault_taken",
+            "lock_guards.fault_wait_ms",
+            "lock_guards.fault_wait_max_ms",
+            "lock_guards.fault_hold_ms",
+            "lock_guards.write_taken",
+            "lock_guards.write_wait_ms",
+            "lock_guards.write_wait_max_ms",
+            "lock_guards.write_hold_ms",
+            "lock_guards.write_hold_max_ms",
+            "lock_guards.mapped_hold_ms",
+            "lock_guards.remap_hold_ms",
+            "lock_guards.queue_mean",
+            "lock_guards.queue_max",
+            "lock_jv.jw_wait_ms",
+            "lock_jv.jw_hold_ms",
+            "lock_jv.jw_hold_max_ms",
+            "lock_jv.jk_wait_ms",
+            "lock_jv.jk_hold_ms",
+            "lock_jv.vg_hold_ms",
+            "lock_jv.vg_wait_ms",
+            "lock_jv.vo_wait_ms",
+            "lock_jv.vo_hold_ms",
+            "lock_extra.is_view_ms",
+            "lock_extra.uncommitted_ms",
+            "lock_extra.faults_found_open",
+        ],
+    ),
+    (
+        "Lock time by thread",
+        &[
+            "lock_extra.fault_wait_title_ms",
+            "lock_extra.fault_wait_other_ms",
+            "lock_roles.sub_guards_wait_ms",
+            "lock_roles.sub_guards_hold_ms",
+            "lock_roles.sub_journal_wait_ms",
+            "lock_roles.sub_journal_hold_ms",
+            "lock_roles.sub_views_wait_ms",
+            "lock_roles.sub_views_hold_ms",
+            "lock_roles.title_guards_wait_ms",
+            "lock_roles.title_guards_hold_ms",
+            "lock_roles.title_journal_wait_ms",
+            "lock_roles.title_journal_hold_ms",
+            "lock_roles.title_views_wait_ms",
+            "lock_roles.title_views_hold_ms",
+            "lock_roles.relay_guards_wait_ms",
+            "lock_roles.relay_guards_hold_ms",
+            "lock_roles.relay_journal_wait_ms",
+            "lock_roles.relay_journal_hold_ms",
+            "lock_roles.relay_views_wait_ms",
+            "lock_roles.relay_views_hold_ms",
+            "lock_roles.other_guards_wait_ms",
+            "lock_roles.other_guards_hold_ms",
+            "lock_roles.other_journal_wait_ms",
+            "lock_roles.other_journal_hold_ms",
+            "lock_roles.other_views_wait_ms",
+            "lock_roles.other_views_hold_ms",
         ],
     ),
     (

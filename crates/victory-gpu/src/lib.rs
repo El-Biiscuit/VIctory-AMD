@@ -37,6 +37,8 @@ mod host;
 mod indirect;
 #[cfg(windows)]
 mod inplace;
+#[cfg(any(test, feature = "diagnostics"))]
+mod lockstat;
 #[cfg(windows)]
 mod material_demand;
 pub mod list;

@@ -282,6 +282,15 @@ struct Views {
 static VIEWS: Mutex<Views> =
     Mutex::new(Views { views: BTreeMap::new(), pages: BTreeMap::new(), sections: Vec::new(), readbacks: Vec::new() });
 
+/// The views' lock. Diagnostics builds and tests count its waits and holds,
+/// apart when the thread holds the guard lock (`crate::lockstat`); it is
+/// taken the same way either way.
+#[cfg(any(test, feature = "diagnostics"))]
+fn views() -> crate::lockstat::Held<'static, Views> {
+    crate::lockstat::take(crate::lockstat::views_site(), &VIEWS, false)
+}
+
+#[cfg(not(any(test, feature = "diagnostics")))]
 fn views() -> std::sync::MutexGuard<'static, Views> {
     VIEWS.lock().unwrap_or_else(|e| e.into_inner())
 }

@@ -813,10 +813,15 @@ fn stats_json(s: &Stats) -> Json {
         ("mean", Json::num(s.mean)),
         ("weighted_mean", Json::opt(s.weighted_mean)),
         ("median", Json::num(s.median)),
+        ("p25", Json::num(s.p25)),
+        ("p75", Json::num(s.p75)),
+        ("iqr", Json::num(s.iqr())),
         ("p95", Json::num(s.p95)),
         ("p99", Json::num(s.p99)),
         ("min", Json::num(s.min)),
         ("max", Json::num(s.max)),
+        ("stdev", Json::num(s.stdev)),
+        ("cv", Json::opt(s.cv())),
         ("first", Json::num(s.first)),
         ("last", Json::num(s.last)),
         ("change_first_to_last", Json::num(s.last - s.first)),
@@ -953,7 +958,7 @@ impl Summary {
     /// One row per metric.
     pub fn csv(&self) -> String {
         let mut out = String::from(
-            "key,label,unit,scope,timing,n,mean,weighted_mean,median,p95,p99,min,max,first,last\n",
+            "key,label,unit,scope,timing,n,mean,weighted_mean,median,p25,p75,p95,p99,min,max,stdev,first,last\n",
         );
         for (k, s) in &self.metrics {
             let row = [
@@ -966,10 +971,13 @@ impl Summary {
                 csv_num(s.mean),
                 s.weighted_mean.map_or(String::new(), csv_num),
                 csv_num(s.median),
+                csv_num(s.p25),
+                csv_num(s.p75),
                 csv_num(s.p95),
                 csv_num(s.p99),
                 csv_num(s.min),
                 csv_num(s.max),
+                csv_num(s.stdev),
                 csv_num(s.first),
                 csv_num(s.last),
             ];
@@ -1036,6 +1044,193 @@ impl Comparison<'_> {
         }
         out
     }
+}
+
+/// Steady windows and bursts (e.g. of texture streaming) of the same
+/// selection, side by side, with their spread and each window metric's
+/// correlation with the frame time.
+pub struct Regimes<'a> {
+    pub steady: &'a Summary,
+    pub bursts: &'a Summary,
+    /// The rule: windows with `key >= min` are bursts.
+    pub key: String,
+    pub min: f64,
+    /// Per window metric: Pearson's r with the frame time, and the windows.
+    pub correlations: Vec<(String, f64, usize)>,
+}
+
+impl Regimes<'_> {
+    pub fn markdown(&self, all: bool) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "# VIctory log: steady periods and bursts\n\nSelection: {}. Copystat windows with `{}` >= {} are bursts; \
+             ticks and gauges go with the window that covers them.\n\n## Steady\n",
+            self.steady.selection, self.key, self.min
+        );
+        runs_table(&mut out, &self.steady.runs);
+        out.push_str("\n## Bursts\n\n");
+        runs_table(&mut out, &self.bursts.runs);
+        let warnings: Vec<&String> = self
+            .steady
+            .warnings
+            .iter()
+            .chain(&self.bursts.warnings)
+            .collect();
+        if !warnings.is_empty() {
+            out.push_str("\nWarnings:\n\n");
+            for w in warnings {
+                let _ = writeln!(out, "- {w}");
+            }
+        }
+        out.push_str(
+            "\nSpread: IQR is the interquartile range (P75 - P25), CV the coefficient of variation (standard deviation / mean). \
+             A correlation does not say which way the cause runs: read it with the lock tables by thread.\n",
+        );
+        let row = |out: &mut String, key: &str| {
+            let (Some(a), Some(b)) = (self.steady.metrics.get(key), self.bursts.metrics.get(key))
+            else {
+                return;
+            };
+            let cv = |s: &Stats| s.cv().map_or("-".into(), |c| format!("{c:.2}"));
+            let _ = writeln!(
+                out,
+                "| {} | `{key}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {}/{} |",
+                catalog::label(key).trim(),
+                catalog::unit(key),
+                num(a.median),
+                num(a.iqr()),
+                num(a.p95),
+                cv(a),
+                num(b.median),
+                num(b.iqr()),
+                num(b.p95),
+                cv(b),
+                pct(change_pct(a.median, b.median)),
+                a.n,
+                b.n,
+            );
+        };
+        let header = "| metric | key | unit | steady median | IQR | P95 | CV | bursts median | IQR | P95 | CV | change of median | n steady/bursts |\n\
+                      |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n";
+        for (title, keys) in SECTIONS {
+            let _ = writeln!(out, "\n## {title}\n");
+            out.push_str(header);
+            for key in *keys {
+                row(&mut out, key);
+            }
+        }
+        if !self.correlations.is_empty() {
+            out.push_str("\n## Correlation with the frame time, per copystat window\n\n");
+            out.push_str(
+                "Pearson's r between each window's figure and the frame time of the frame-rate line it covers, \
+                 over every selected window (steady and bursts).\n\n",
+            );
+            out.push_str("| metric | key | r | windows |\n|---|---|---:|---:|\n");
+            for (key, r, n) in self
+                .correlations
+                .iter()
+                .take(if all { usize::MAX } else { 30 })
+            {
+                let _ = writeln!(
+                    out,
+                    "| {} | `{key}` | {r:+.2} | {n} |",
+                    catalog::label(key).trim()
+                );
+            }
+        }
+        if all {
+            out.push_str("\n## Every metric\n\n");
+            out.push_str(header);
+            for key in self.steady.metrics.keys() {
+                row(&mut out, key);
+            }
+        }
+        out
+    }
+
+    pub fn json(&self) -> Json {
+        let correlations = self
+            .correlations
+            .iter()
+            .map(|(k, r, n)| {
+                Json::obj(vec![
+                    ("key", Json::str(k.clone())),
+                    ("r", Json::num(*r)),
+                    ("windows", Json::Num(*n as f64)),
+                ])
+            })
+            .collect();
+        Json::obj(vec![
+            ("tool", Json::str("cargo xtask perf-log regimes")),
+            ("format", Json::Num(1.0)),
+            ("burst_key", Json::str(self.key.clone())),
+            ("burst_min", Json::num(self.min)),
+            ("steady", self.steady.json()),
+            ("bursts", self.bursts.json()),
+            ("correlations_with_frame_ms", Json::Arr(correlations)),
+        ])
+    }
+
+    /// One row per metric present on both sides.
+    pub fn csv(&self) -> String {
+        let mut out = String::from(
+            "key,label,unit,steady_n,steady_median,steady_p25,steady_p75,steady_p95,steady_stdev,\
+             bursts_n,bursts_median,bursts_p25,bursts_p75,bursts_p95,bursts_stdev,median_change_pct,r_frame_ms\n",
+        );
+        for (key, a) in &self.steady.metrics {
+            let Some(b) = self.bursts.metrics.get(key) else {
+                continue;
+            };
+            let r = self
+                .correlations
+                .iter()
+                .find(|c| &c.0 == key)
+                .map_or(String::new(), |c| csv_num(c.1));
+            let row = [
+                key.clone(),
+                catalog::label(key).trim().to_owned(),
+                catalog::unit(key).to_owned(),
+                a.n.to_string(),
+                csv_num(a.median),
+                csv_num(a.p25),
+                csv_num(a.p75),
+                csv_num(a.p95),
+                csv_num(a.stdev),
+                b.n.to_string(),
+                csv_num(b.median),
+                csv_num(b.p25),
+                csv_num(b.p75),
+                csv_num(b.p95),
+                csv_num(b.stdev),
+                change_pct(a.median, b.median).map_or(String::new(), csv_num),
+                r,
+            ];
+            push_csv_row(&mut out, &row);
+        }
+        out
+    }
+}
+
+/// Each window metric's correlation with the frame time over the selected
+/// windows of `selected`, strongest first; metrics with fewer than
+/// `min_windows` windows or no spread are left out.
+pub fn correlations(selected: &[Selected], min_windows: usize) -> Vec<(String, f64, usize)> {
+    let mut pairs: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+    for sel in selected {
+        for (ms, w) in super::parse::window_frames_paired(sel) {
+            for (k, v) in &w.values {
+                pairs.entry(k.clone()).or_default().push((ms, *v));
+            }
+        }
+    }
+    let mut out: Vec<(String, f64, usize)> = pairs
+        .into_iter()
+        .filter(|(_, p)| p.len() >= min_windows)
+        .filter_map(|(k, p)| super::stats::correlation(&p).map(|r| (k, r, p.len())))
+        .collect();
+    out.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()).then(a.0.cmp(&b.0)));
+    out
 }
 
 fn csv_num(v: f64) -> String {

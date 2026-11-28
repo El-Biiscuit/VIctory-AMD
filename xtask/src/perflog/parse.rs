@@ -599,6 +599,107 @@ pub fn select<'a>(run: &'a Run, sel: &Selection) -> Selected<'a> {
     out
 }
 
+/// Splits a selection into the copystat windows where `key` is below
+/// `min` (steady) and those where it is at or above it (bursts, e.g. of
+/// texture streaming). Ticks, gauges and present events go with the window
+/// written after them, which covers them; those after the last window are
+/// left out of both.
+pub fn split<'a>(sel: &Selected<'a>, key: &str, min: f64) -> (Selected<'a>, Selected<'a>) {
+    let mut steady = Selected {
+        run: sel.run,
+        ..Selected::default()
+    };
+    let mut bursts = Selected {
+        run: sel.run,
+        ..Selected::default()
+    };
+    let Some(run) = sel.run else {
+        return (steady, bursts);
+    };
+    // The selected windows in log order, with their run index and class.
+    let mut windows: Vec<(usize, &Sample, bool)> = Vec::new();
+    for (i, w) in run.windows.iter().enumerate() {
+        if let Some(&frames) = sel.window_frames.get(&i) {
+            let burst = w.get(key).is_some_and(|v| v >= min);
+            windows.push((i, w, burst));
+            let side = if burst { &mut bursts } else { &mut steady };
+            side.windows.push(w);
+            side.window_frames.insert(i, frames);
+        }
+    }
+    let class_of = |line: usize| {
+        windows
+            .iter()
+            .find(|(_, w, _)| w.line >= line)
+            .map(|&(_, _, b)| b)
+    };
+    for t in &sel.ticks {
+        match class_of(t.line) {
+            Some(true) => bursts.ticks.push(t),
+            Some(false) => steady.ticks.push(t),
+            None => {}
+        }
+    }
+    for g in &sel.gauges {
+        match class_of(g.line) {
+            Some(true) => bursts.gauges.push(g),
+            Some(false) => steady.gauges.push(g),
+            None => {}
+        }
+    }
+    for h in &sel.hot {
+        if let Some(i) = h.window {
+            if bursts.window_frames.contains_key(&i) {
+                bursts.hot.push(h);
+            } else if steady.window_frames.contains_key(&i) {
+                steady.hot.push(h);
+            }
+        }
+    }
+    // Present events have no line kept with them: by time, against the
+    // windows' times.
+    for &t in &sel.presents {
+        let class = windows
+            .iter()
+            .find(|(_, w, _)| w.t.is_some_and(|wt| wt >= t))
+            .map(|&(_, _, b)| b);
+        match class {
+            Some(true) => bursts.presents.push(t),
+            Some(false) => steady.presents.push(t),
+            None => {}
+        }
+    }
+    for side in [&mut steady, &mut bursts] {
+        let times: Vec<f64> = side.ticks.iter().filter_map(|s| s.t).collect();
+        side.span_secs = times.first().zip(times.last()).map(|(a, b)| b - a);
+        side.warnings = sel.warnings.clone();
+    }
+    (steady, bursts)
+}
+
+/// Per selected copystat window, its values with the frame time of the
+/// frame-rate line written just before it in the same window (the last
+/// tick it covers), for correlations.
+pub fn window_frames_paired<'a>(sel: &Selected<'a>) -> Vec<(f64, &'a Sample)> {
+    let mut out = Vec::new();
+    let Some(run) = sel.run else { return out };
+    let mut previous_line = 0;
+    for (i, w) in run.windows.iter().enumerate() {
+        if sel.window_frames.contains_key(&i)
+            && let Some(ms) = sel
+                .ticks
+                .iter()
+                .filter(|t| t.line > previous_line && t.line < w.line)
+                .filter_map(|t| t.get("frame.ms"))
+                .next_back()
+        {
+            out.push((ms, w));
+        }
+        previous_line = w.line;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{strip_ansi, timestamp};

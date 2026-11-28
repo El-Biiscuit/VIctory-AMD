@@ -143,6 +143,77 @@ For each cause, the line gives:
 
 The counting changes nothing in what the guards do. It costs two clock readings per call. `VICTORY_PROTECT_STATS=0` leaves it out. The Windows tests in `watch.rs` (`protection_changes_are_counted_by_cause`, `joinable_runs_and_submission_time_are_counted`, `failed_protections_are_counted`) check the counts against real views written through two aliases. They run with `cargo test -p victory-gpu --lib` on Windows and need no graphics card.
 
+## Lock waits and holds (`lock_guards.*`, `lock_jv.*`, `lock_roles.*`, `lock_extra.*`)
+
+Diagnostics builds count, over the copystat window, how long three locks are waited for and held:
+- `GUARDS`, the guard state of view memory (`watch.rs`);
+- `JOURNAL`, the write-watch journal (`watch.rs`);
+- `VIEWS`, the title's views (`inplace.rs`).
+
+The counts are split by who takes the lock (`crate::lockstat`):
+
+| Site | Keys | Who |
+| --- | --- | --- |
+| `GUARDS`, checks | `lock_guards.check_*` | `guard()`: guarding the blocks a copy has taken, and their other views |
+| `GUARDS`, looks before checks | `lock_guards.known_*` | the test whether a range's first block is known |
+| `GUARDS`, write faults | `lock_guards.fault_*` | the write-fault handler, on the faulting thread |
+| `GUARDS`, writes told | `lock_guards.write_*` | `writing()`: the title's kernel reads (files, DirectStorage), our writes into title memory (relay, writebacks, copies) |
+| `GUARDS`, views mapped and remaps | `lock_guards.mapped_*`, `lock_guards.remap_*` | mapping changes |
+| `JOURNAL` | `lock_jv.jw_*` (write-watch askings, held across the kernel call and the guard check), `lock_jv.ja_*` (looks at askings ahead), `lock_jv.jk_*` (askings ahead), `lock_jv.jo_*` (other) | `watch.rs` |
+| `VIEWS` | `lock_jv.vg_*` (taken while the thread holds `GUARDS`: alias lookups, part of that `GUARDS` hold), `lock_jv.vo_*` (other) | `inplace.rs` |
+
+Per site, the line gives:
+- times taken;
+- time waiting, with the longest wait;
+- time held, with the longest hold;
+- how many waits went over 0.1 ms, and how many holds over 0.1 ms and over 1 ms.
+
+Times are per frame. Longest waits and holds are for the whole window, not per frame. `*_queue_mean` is the mean number of threads already waiting when a thread asked for the lock, and `*_queue_max` the most seen at once.
+
+`lock_roles.*` gives the same wait and hold times by kind of thread:
+
+| Role | Keys | Meaning |
+| --- | --- | --- |
+| In submissions | `sub_*` | The submission lock is held: the frame waits for this time. |
+| Title submitting threads outside their submissions | `title_*` | The title's render threads. A stall here delays the next submission. This is the title's critical path. |
+| The relay | `relay_*` | The thread named `victory-relay`. Settles wait for it. |
+| Other threads | `other_*` | The title's workers, file and streaming threads, texture refreshes. |
+
+`lock_extra.*` gives:
+- the time checks spend asking Windows whether a range is view memory, before taking `GUARDS`;
+- the time checks spend asking about uncommitted blocks, while holding `GUARDS`;
+- the write faults that found their block already open (another thread opened it while they waited);
+- the write faults' waits split into those on title submitting threads and those on other threads.
+
+**Reading the lines.**
+- **Wait** is time a thread could not run.
+- **Hold** is time it kept others out.
+- Long waits on one site with long holds on another site show who blocks whom.
+- `title_*` and `sub_*` waits are the ones on the critical path. `other_*` waits may run beside the frame.
+
+**Cost and switch.**
+- The counting allocates, sorts and logs nothing while a lock is held or in the fault handler.
+- Inside a lock it costs two clock readings. All the counts are added after the lock is released.
+- `copystat` formats them at its own line.
+- Measured outside Windows, in a Linux virtual machine: about 125 ns per take and release, most of it the clock. The test `lockstat::tests::counting_costs_little` prints the figure on any machine with `-- --nocapture`.
+- `VICTORY_LOCK_STATS=0` turns this counting off. `VICTORY_PROTECT_STATS=0` turns off the `protect.*` counting. The two switches are independent.
+
+## Steady periods and bursts (`cargo xtask perf-log regimes`)
+
+`cargo xtask perf-log regimes <logs> [--burst-key KEY] [--burst-min X]` splits the selected copystat windows in two:
+- **bursts**: the windows where `KEY` is at least `X` (by default `account.tex_uploads` >= 300, i.e. heavy texture streaming: in the reference log, quiet scenes record 5 to 45 uploads per frame, ordinary play 100 to 260, and streaming bursts 400 to 1,100);
+- **steady**: the others.
+
+Ticks, gauges and present events go with the window that covers them. The filters are the same as for `summary`.
+
+For each headline metric, the report gives on both sides the median, the interquartile range (P75 - P25), the P95 and the coefficient of variation (standard deviation / mean), plus the change of the median from steady to bursts. It also gives each window metric's correlation (Pearson's r) with the frame time of the frame-rate line the window covers.
+
+A correlation does not say which way the cause runs. Read it together with the tables by thread:
+- if `title_*` and `sub_*` waits grow in bursts, the locks are on the critical path;
+- if only `other_*` waits grow, the waits follow the streaming without holding up the frame.
+
+`summary` and `compare` also give `p25`, `p75`, `iqr`, `stdev` and `cv` for every metric in their JSON and CSV output.
+
 ## Main keys
 
 | Prefix | Line in the runtime | Source |
@@ -155,6 +226,7 @@ The counting changes nothing in what the guards do. It costs two clock readings 
 | `card.*` | `host copies in the card's memory` | `host.rs`, `Meter::frame` |
 | `d3d.<queue>.*`, `joins.*`, `texrefresh.*`, `fills.*`, `card_passes.*`, `slow_watch.*` | per-tick lines | `host.rs`, `Meter::frame` |
 | `copies.*`, `recording.*`, `account.*`, `whole.*`, `card_wait.*`, `heap.*`, `barrier_waits.*` | copystat lines | `copystat.rs`, `log` |
+| `lock_guards.*`, `lock_jv.*`, `lock_roles.*`, `lock_extra.*` | `GUARDS lock per frame`, `JOURNAL and VIEWS locks per frame`, `lock time per frame by thread`, `guard lock around checks and faults per frame` | `copystat.rs`, `log_locks` (counted in `lockstat.rs`) |
 | `protect.*`, `guard_waits.*` | `guard protection changes per frame (VirtualProtect)`, `guard waits per frame` | `copystat.rs`, `log_protections` (counted in `watch.rs`, `stats`) |
 | `vram.*`, `memory.*`, `tex_memory.*`, `let_go.*`, `staging_pool.*`, `budget_change.*` | gauges | `host.rs`, `copystat.rs`, `log_memory` |
 

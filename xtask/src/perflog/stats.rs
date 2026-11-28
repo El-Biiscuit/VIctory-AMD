@@ -9,10 +9,16 @@ pub struct Stats {
     /// Mean weighted by each sample's frames, where samples carry them.
     pub weighted_mean: Option<f64>,
     pub median: f64,
+    /// The first and third quartiles: `p75 - p25` is the interquartile
+    /// range, the spread of the middle half.
+    pub p25: f64,
+    pub p75: f64,
     pub p95: f64,
     pub p99: f64,
     pub min: f64,
     pub max: f64,
+    /// Standard deviation (population).
+    pub stdev: f64,
     /// The first and last value in log order.
     pub first: f64,
     pub last: f64,
@@ -48,6 +54,7 @@ pub fn stats(values: &[(f64, f64)]) -> Option<Stats> {
     sorted.sort_by(f64::total_cmp);
     let n = sorted.len();
     let mean = sorted.iter().sum::<f64>() / n as f64;
+    let stdev = (sorted.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
     let weighted_mean = if finite.iter().all(|(_, w)| *w > 0.0) {
         let total: f64 = finite.iter().map(|(_, w)| w).sum();
         Some(finite.iter().map(|(v, w)| v * w).sum::<f64>() / total)
@@ -59,13 +66,54 @@ pub fn stats(values: &[(f64, f64)]) -> Option<Stats> {
         mean,
         weighted_mean,
         median: percentile(&sorted, 50.0),
+        p25: percentile(&sorted, 25.0),
+        p75: percentile(&sorted, 75.0),
         p95: percentile(&sorted, 95.0),
         p99: percentile(&sorted, 99.0),
         min: sorted[0],
         max: sorted[n - 1],
+        stdev,
         first: finite[0].0,
         last: finite[finite.len() - 1].0,
     })
+}
+
+impl Stats {
+    /// The interquartile range.
+    pub fn iqr(&self) -> f64 {
+        self.p75 - self.p25
+    }
+
+    /// The coefficient of variation (standard deviation over mean), when
+    /// the mean is not zero.
+    pub fn cv(&self) -> Option<f64> {
+        (self.mean.abs() > f64::EPSILON).then(|| self.stdev / self.mean.abs())
+    }
+}
+
+/// Pearson's correlation of paired values; `None` with fewer than three
+/// pairs or no spread.
+pub fn correlation(pairs: &[(f64, f64)]) -> Option<f64> {
+    let pairs: Vec<(f64, f64)> = pairs
+        .iter()
+        .copied()
+        .filter(|(a, b)| a.is_finite() && b.is_finite())
+        .collect();
+    if pairs.len() < 3 {
+        return None;
+    }
+    let n = pairs.len() as f64;
+    let (ma, mb) = (
+        pairs.iter().map(|p| p.0).sum::<f64>() / n,
+        pairs.iter().map(|p| p.1).sum::<f64>() / n,
+    );
+    let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+    for (a, b) in pairs {
+        sab += (a - ma) * (b - mb);
+        saa += (a - ma).powi(2);
+        sbb += (b - mb).powi(2);
+    }
+    (saa > 0.0 && sbb > 0.0).then(|| sab / (saa * sbb).sqrt())
 }
 
 /// The relative change from `before` to `after`, in percent.
@@ -79,7 +127,7 @@ pub fn change_pct(before: f64, after: f64) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{change_pct, percentile, stats};
+    use super::{change_pct, correlation, percentile, stats};
 
     #[test]
     fn percentiles_interpolate_between_ranks() {
@@ -113,6 +161,22 @@ mod tests {
             None
         );
         assert!(stats(&[]).is_none());
+    }
+
+    #[test]
+    fn dispersion_and_correlation() {
+        let s = stats(&[(1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0), (5.0, 0.0)]).unwrap();
+        assert_eq!((s.p25, s.p75, s.iqr()), (2.0, 4.0, 2.0));
+        assert!((s.stdev - 2f64.sqrt()).abs() < 1e-12);
+        assert!((s.cv().unwrap() - 2f64.sqrt() / 3.0).abs() < 1e-12);
+        let up: Vec<(f64, f64)> = (0..10)
+            .map(|i| (f64::from(i), 2.0 * f64::from(i) + 1.0))
+            .collect();
+        assert!((correlation(&up).unwrap() - 1.0).abs() < 1e-12);
+        let down: Vec<(f64, f64)> = (0..10).map(|i| (f64::from(i), -f64::from(i))).collect();
+        assert!((correlation(&down).unwrap() + 1.0).abs() < 1e-12);
+        assert_eq!(correlation(&[(1.0, 1.0), (2.0, 1.0), (3.0, 1.0)]), None);
+        assert_eq!(correlation(&[(1.0, 1.0), (2.0, 2.0)]), None);
     }
 
     #[test]
