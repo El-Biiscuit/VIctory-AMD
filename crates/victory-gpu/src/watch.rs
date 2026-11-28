@@ -757,6 +757,10 @@ impl Guards {
     }
 }
 
+/// The guard lock, uncounted: builds without diagnostics, and tests that
+/// look at the state directly. Everything else takes it through
+/// [`guard_lock`].
+#[cfg(any(test, not(feature = "diagnostics")))]
 fn guards() -> std::sync::MutexGuard<'static, Guards> {
     GUARDS.lock().unwrap_or_else(|e| e.into_inner())
 }
