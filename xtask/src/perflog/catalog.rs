@@ -297,6 +297,23 @@ pub const ENTRIES: &[Entry] = &[
                   or submission, having waited {waited_before_ms} ms for GUARDS before it",
     },
     Entry {
+        id: "prep",
+        scope: Scope::Copy,
+        pattern: "submission preparing per frame on the submitting thread (timed as frame.cpu_ms): \
+                  {submissions} submissions, {total_ms} ms (longest {longest_ms} ms); asking once {ask_once_ms} ms; deferred \
+                  steps {deferred_ms} ms (title copies {step_copy_ms} ms, fills {step_fill_ms} ms, title and host work \
+                  {step_work_ms} ms, ranges shaders write {step_gpu_write_ms} ms, textures {step_texture_ms} ms, refresh steps \
+                  noted and the loop {step_rest_ms} ms; inside them refreshes done {step_updates_ms} ms and write-watch askings \
+                  ahead {step_ask_ahead_ms} ms); sparse textures {sparse_ms} ms; preludes planned {prelude_ms} ms; preludes \
+                  recorded in parallel {record_preludes_ms} ms; last flush {flush_ms} ms (refreshes done {flush_updates_ms} ms, \
+                  write-watch askings ahead {flush_ask_ahead_ms} ms); end of the asking once {ask_once_end_ms} ms; snapshots \
+                  {snapshots_ms} ms (taking the list {snap_take_ms} ms, cutting jobs {snap_jobs_ms} ms, queueing {snap_queue_ms} \
+                  ms, this thread copying {snap_own_ms} ms, waiting for the kept threads {snap_wait_ms} ms, other \
+                  {snap_other_ms} ms; {snap_mb} MB in {snap_jobs} jobs); copies in the card's memory {card_before_ms} ms; the \
+                  rest {rest_ms} ms; steps over their submission {over} times ({over_ms} ms); before the timed time: sweep \
+                  {sweep_ms} ms, waiting slots made {waiting_slots_ms} ms",
+    },
+    Entry {
         id: "whole",
         scope: Scope::Copy,
         pattern: "copied whole (memory not watched): {whole_ms} ms per frame in {ranges} ranges",
@@ -1724,6 +1741,222 @@ pub const META: &[Meta] = &[
         Lower,
     ),
     m(
+        "prep.submissions",
+        "Submissions prepared",
+        Volume,
+        Lower,
+    ),
+    m(
+        "prep.total_ms",
+        "Preparation timed by step (same time as frame.cpu_ms)",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.longest_ms",
+        "Longest submission preparation in the window",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.ask_once_ms",
+        "Step: one write-watch asking (VICTORY_ASK_ONCE)",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.deferred_ms",
+        "Step: lists' deferred steps",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.step_copy_ms",
+        "of it: title copies into title memory",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.step_fill_ms",
+        "of it: fills of upload memory",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.step_work_ms",
+        "of it: title and host work",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.step_gpu_write_ms",
+        "of it: ranges shaders write (refresh first, snapshot noted)",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.step_texture_ms",
+        "of it: textures",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.step_rest_ms",
+        "of it: refresh steps noted and the loop",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.step_updates_ms",
+        "inside the steps: host copy refreshes done",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.step_ask_ahead_ms",
+        "inside the steps: write-watch askings ahead",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.sparse_ms",
+        "Step: sparse textures readied",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.prelude_ms",
+        "Step: preludes planned",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.record_preludes_ms",
+        "Step: preludes recorded in parallel",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.flush_ms",
+        "Step: last flush of pending refreshes",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.flush_updates_ms",
+        "of it: host copy refreshes done",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.flush_ask_ahead_ms",
+        "of it: write-watch askings ahead",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.ask_once_end_ms",
+        "Step: end of the one asking",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.snapshots_ms",
+        "Step: snapshots of ranges shaders may write",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.snap_take_ms",
+        "of it: taking the noted list",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.snap_jobs_ms",
+        "of it: cutting it into jobs",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.snap_queue_ms",
+        "of it: queueing the jobs",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.snap_own_ms",
+        "of it: the submitting thread copying",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.snap_wait_ms",
+        "of it: waiting for the kept threads",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.snap_other_ms",
+        "of it: other",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.snap_mb",
+        "Snapshot bytes taken in the step",
+        Volume,
+        Lower,
+    ),
+    m(
+        "prep.snap_jobs",
+        "Snapshot jobs",
+        Volume,
+        Lower,
+    ),
+    m(
+        "prep.card_before_ms",
+        "Step: copies in the card's memory (before the lists)",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.rest_ms",
+        "Rest of the preparation (per submission: time less its steps)",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.over",
+        "Submissions whose steps overran their time by over 0.1 ms",
+        Volume,
+        Lower,
+    ),
+    m(
+        "prep.over_ms",
+        "Their overrun",
+        Volume,
+        Lower,
+    ),
+    m(
+        "prep.sweep_ms",
+        "Before the timed time: the sweep (not in frame.cpu_ms)",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.waiting_slots_ms",
+        "Before the timed time: waiting slots made (not in frame.cpu_ms)",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "prep.sum_gap_ms",
+        "Timed preparation less steps and rest (rounding only)",
+        Volume,
+        Lower,
+    ),
+    m(
         "account.until_record_ms",
         "After a present, until the first list call",
         Wall,
@@ -2278,6 +2511,47 @@ pub const SECTIONS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Submission preparation by step (PREP-0)",
+        &[
+            "prep.submissions",
+            "prep.total_ms",
+            "prep.longest_ms",
+            "prep.ask_once_ms",
+            "prep.deferred_ms",
+            "prep.step_copy_ms",
+            "prep.step_fill_ms",
+            "prep.step_work_ms",
+            "prep.step_gpu_write_ms",
+            "prep.step_texture_ms",
+            "prep.step_rest_ms",
+            "prep.step_updates_ms",
+            "prep.step_ask_ahead_ms",
+            "prep.sparse_ms",
+            "prep.prelude_ms",
+            "prep.record_preludes_ms",
+            "prep.flush_ms",
+            "prep.flush_updates_ms",
+            "prep.flush_ask_ahead_ms",
+            "prep.ask_once_end_ms",
+            "prep.snapshots_ms",
+            "prep.snap_take_ms",
+            "prep.snap_jobs_ms",
+            "prep.snap_queue_ms",
+            "prep.snap_own_ms",
+            "prep.snap_wait_ms",
+            "prep.snap_other_ms",
+            "prep.snap_mb",
+            "prep.snap_jobs",
+            "prep.card_before_ms",
+            "prep.rest_ms",
+            "prep.over",
+            "prep.over_ms",
+            "prep.sweep_ms",
+            "prep.waiting_slots_ms",
+            "prep.sum_gap_ms",
+        ],
+    ),
+    (
         "Lock time by kind of other thread",
         &[
             "lock_kinds.rec_guards_wait_ms",
@@ -2449,6 +2723,7 @@ mod tests {
             "card.extra_wait_sync_ms",
             "protect.calls_if_joined",
             "lock_kinds.guards_wait_gap_ms",
+            "prep.sum_gap_ms",
         ];
         let mut known: Vec<String> = derived.iter().map(|s| (*s).to_owned()).collect();
         for e in ENTRIES {

@@ -1107,10 +1107,19 @@ fn workers() -> &'static Workers {
 /// Runs `jobs` on the kept threads and on this one, and returns when all
 /// of them are done. The jobs copy and compare memory; they do not panic.
 fn wide(jobs: Vec<Job>) {
+    // The parts on this thread (PR PREP-0): queueing, running jobs itself,
+    // waiting for the kept threads. Counted only inside a timed step of a
+    // submission's preparation (the snapshots), ignored elsewhere.
+    #[cfg(feature = "diagnostics")]
+    use crate::prepstat::{Part, part_since};
+    #[cfg(feature = "diagnostics")]
+    let queueing = std::time::Instant::now();
     if jobs.len() < 2 {
         for job in jobs {
             job();
         }
+        #[cfg(feature = "diagnostics")]
+        part_since(Part::SnapOwn, queueing);
         return;
     }
     let workers = workers();
@@ -1130,6 +1139,11 @@ fn wide(jobs: Vec<Job>) {
         }
     }
     workers.more.notify_all();
+    #[cfg(feature = "diagnostics")]
+    let running = {
+        part_since(Part::SnapQueue, queueing);
+        std::time::Instant::now()
+    };
     loop {
         let job = workers.jobs.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
         match job {
@@ -1137,10 +1151,17 @@ fn wide(jobs: Vec<Job>) {
             None => break,
         }
     }
+    #[cfg(feature = "diagnostics")]
+    let waiting = {
+        part_since(Part::SnapOwn, running);
+        std::time::Instant::now()
+    };
     let mut n = left.0.lock().unwrap_or_else(|e| e.into_inner());
     while *n > 0 {
         n = left.1.wait(n).unwrap_or_else(|e| e.into_inner());
     }
+    #[cfg(feature = "diagnostics")]
+    part_since(Part::SnapWait, waiting);
 }
 
 /// [`wide`], for the host's own work on host copies (a submission's
@@ -1160,11 +1181,26 @@ static SNAPS: Mutex<Vec<(usize, usize, usize)>> = Mutex::new(Vec::new());
 /// its lists go to the card: takes the snapshots [`Shadow::writing`] noted.
 /// Nothing to do without the switch.
 pub(crate) fn take_snapshots() {
+    // Each part timed for the submission's preparation (PR PREP-0).
+    #[cfg(feature = "diagnostics")]
+    let taking = std::time::Instant::now();
     let snaps = std::mem::take(&mut *SNAPS.lock().unwrap_or_else(|e| e.into_inner()));
+    #[cfg(feature = "diagnostics")]
+    crate::prepstat::part_since(crate::prepstat::Part::SnapTake, taking);
     if snaps.is_empty() {
         return;
     }
-    wide(copy_jobs(snaps));
+    #[cfg(feature = "diagnostics")]
+    let cutting = std::time::Instant::now();
+    #[cfg(feature = "diagnostics")]
+    crate::prepstat::count(crate::prepstat::SNAP_BYTES, snaps.iter().map(|s| s.2 as u64).sum());
+    let jobs = copy_jobs(snaps);
+    #[cfg(feature = "diagnostics")]
+    {
+        crate::prepstat::count(crate::prepstat::SNAP_JOBS, jobs.len() as u64);
+        crate::prepstat::part_since(crate::prepstat::Part::SnapJobs, cutting);
+    }
+    wide(jobs);
 }
 
 /// `copies` (from, to, bytes) as pieces of work of about [`WIDE_JOB`]

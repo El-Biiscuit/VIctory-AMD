@@ -256,6 +256,16 @@ fn synthetic(spec: &Spec) -> String {
              told by recording threads 0 taken 0.10 ms waiting, runtime workers 0 taken 0.10 ms waiting, other title \
              threads 0 taken 2.75 ms waiting, unclassified 0 taken 0.10 ms waiting; since the last line 2 threads made \
              their first list call or submission, having waited 0.75 ms for GUARDS before it".into());
+        line(t, c, "submission preparing per frame on the submitting thread (timed as frame.cpu_ms): 45.0 submissions, \
+             156.00 ms (longest 12.00 ms); asking once 1.00 ms; deferred steps 60.00 ms (title copies 5.00 ms, fills 4.00 \
+             ms, title and host work 1.00 ms, ranges shaders write 10.00 ms, textures 15.00 ms, refresh steps noted and the \
+             loop 25.00 ms; inside them refreshes done 30.00 ms and write-watch askings ahead 2.00 ms); sparse textures \
+             0.50 ms; preludes planned 6.00 ms; preludes recorded in parallel 2.00 ms; last flush 20.00 ms (refreshes done \
+             18.00 ms, write-watch askings ahead 1.50 ms); end of the asking once 0.50 ms; snapshots 53.00 ms (taking the \
+             list 0.10 ms, cutting jobs 0.40 ms, queueing 0.50 ms, this thread copying 30.00 ms, waiting for the kept \
+             threads 21.00 ms, other 1.00 ms; 480.0 MB in 480 jobs); copies in the card's memory 8.00 ms; the rest 5.00 ms; \
+             steps over their submission 0.0 times (0.00 ms); before the timed time: sweep 0.30 ms, waiting slots made 0.20 \
+             ms".into());
         line(t, c, "guards over several views of a page, since the start: 1 blocks guarded with their other views, 2 views opened by a write through another, 3 ranges opened because a view of them was mapped".into());
         line(
             t,
@@ -907,6 +917,35 @@ fn other_thread_kinds_are_read() {
     assert!(md.contains("## Lock time by kind of other thread"), "{md}");
     assert!(
         md.contains("`lock_kinds.fault_rec_wait_ms` | ms | thread-sum |"),
+        "{md}"
+    );
+}
+
+/// The preparation by step (PR PREP-0) is read; steps and rest give its
+/// timed time back, and the summary sets it beside `frame.cpu_ms`.
+#[test]
+fn preparation_steps_are_read() {
+    let run = parse("synthetic.log", &synthetic(&Spec::default()));
+    assert!(run.unparsed.is_empty(), "{:?}", run.unparsed);
+    let w = &run.windows[0];
+    assert_eq!(w.get("prep.total_ms"), Some(156.0));
+    assert_eq!(w.get("prep.snapshots_ms"), Some(53.0));
+    assert_eq!(w.get("prep.snap_wait_ms"), Some(21.0));
+    assert_eq!(w.get("prep.flush_updates_ms"), Some(18.0));
+    assert_eq!(w.get("prep.snap_mb"), Some(480.0));
+    assert_eq!(w.get("prep.waiting_slots_ms"), Some(0.2));
+    // 1 + 60 + 0.5 + 6 + 2 + 20 + 0.5 + 53 + 8 + 5 = 156.
+    let gap = w.get("prep.sum_gap_ms").unwrap();
+    assert!(gap.abs() < 1e-9, "{gap}");
+    let s = summary_of(&synthetic(&Spec::default()), &Selection::default());
+    let md = s.markdown(false, 8);
+    assert!(
+        md.contains("## Submission preparation by step (PREP-0)"),
+        "{md}"
+    );
+    assert!(md.contains("- CPU preparing by step (PREP-0;"), "{md}");
+    assert!(
+        md.contains("`prep.snapshots_ms` | ms | submit-path |"),
         "{md}"
     );
 }

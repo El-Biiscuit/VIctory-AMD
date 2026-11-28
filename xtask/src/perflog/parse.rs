@@ -411,6 +411,26 @@ fn derive(run: &mut Run) {
             s.values
                 .insert("lock_kinds.guards_wait_gap_ms".into(), other - parts);
         }
+        // The steps of the preparation and its rest must give its timed
+        // time back: what is left is the rounding of the printed values.
+        let steps = [
+            "prep.ask_once_ms",
+            "prep.deferred_ms",
+            "prep.sparse_ms",
+            "prep.prelude_ms",
+            "prep.record_preludes_ms",
+            "prep.flush_ms",
+            "prep.ask_once_end_ms",
+            "prep.snapshots_ms",
+            "prep.card_before_ms",
+            "prep.rest_ms",
+        ];
+        if let Some(total) = s.get("prep.total_ms")
+            && steps.iter().all(|k| s.values.contains_key(*k))
+        {
+            let parts: f64 = steps.iter().map(|k| s.values[*k]).sum();
+            s.values.insert("prep.sum_gap_ms".into(), total - parts);
+        }
         if let (Some(checked), Some(unchanged)) =
             (s.get("copies.checked_mb"), s.get("copies.unchanged_mb"))
         {
