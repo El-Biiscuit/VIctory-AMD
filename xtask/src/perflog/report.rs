@@ -402,6 +402,14 @@ impl Summary {
         );
         out.push_str("- \"Waiting for the card\" is the CPU blocked on fences, not the card's own work time; the card's clock above is the better measure of that.\n");
         out.push_str("- Copystat times (`copies.*`, `recording.*`, `account.*`) are summed over every thread and cover about 5 s each: compare them with each other, not with the frame time.\n");
+        if self.relay
+            && self
+                .metrics
+                .get("card_wait.under2")
+                .is_some_and(|s| s.max == 0.0)
+        {
+            out.push_str("- With the relay, the `card_wait.*` classes stay at zero (those fence waits are not classed on that path): read `late.wait_ms` and `settle_wait.*` instead.\n");
+        }
     }
 
     fn metric_rows(&self, out: &mut String, keys: &[&str]) {

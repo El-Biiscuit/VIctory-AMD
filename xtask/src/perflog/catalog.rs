@@ -39,7 +39,8 @@ pub enum Scope {
 pub enum HotKind {
     /// Compared after submissions, with the bytes put back.
     Compared,
-    /// Copied into host copies, by memory type.
+    /// Host copy refreshes by range (`Batch::update`): the bytes asked
+    /// for, most of which the write watch finds unchanged.
     Copied,
     /// Copied whole because the memory is not write-watched.
     Whole,
@@ -49,7 +50,7 @@ impl HotKind {
     pub fn name(self) -> &'static str {
         match self {
             HotKind::Compared => "compared_after_submissions",
-            HotKind::Copied => "copied_into_host_copies",
+            HotKind::Copied => "refreshed_host_copy_ranges_bytes_asked",
             HotKind::Whole => "copied_whole_unwatched",
         }
     }
@@ -363,7 +364,7 @@ pub const META: &[Meta] = &[
     ),
     m(
         "frame.copy_ms",
-        "  of it: title memory copies",
+        "  of it: host copy refreshes and title copies (write-watch asks included)",
         SubmitPath,
         Lower,
     ),
@@ -524,10 +525,93 @@ pub const META: &[Meta] = &[
         Volume,
         Lower,
     ),
+    // With the relay these waits are its own (`relay.fetch_wait_ms` counts
+    // the same ones); without it they are on the submitting thread.
     m(
         "card.extra_wait_ms",
-        "Extra waits for the card for those fetches",
+        "Waits for card copy fetches",
+        CopyBack,
+        Lower,
+    ),
+    m("copies.refreshes", "Host copy refresh steps", Volume, Lower),
+    m(
+        "copies.watches",
+        "Write-watch askings (count)",
+        Volume,
+        Lower,
+    ),
+    m(
+        "copies.move_ms",
+        "Waiting for title memory moves",
+        ThreadSum,
+        Lower,
+    ),
+    m(
+        "recording.gpu_write_steps",
+        "Shader-written range steps",
+        Volume,
+        Lower,
+    ),
+    m(
+        "late.why_read",
+        "Settles because title memory was read",
+        Volume,
+        Lower,
+    ),
+    m(
+        "late.why_read_fill",
+        "  by a fill of upload memory",
+        Volume,
+        Lower,
+    ),
+    m("late.why_read_copy", "  by a buffer copy", Volume, Lower),
+    m("late.why_read_texture", "  by a texture", Volume, Lower),
+    m(
+        "late.why_stale",
+        "Settles because title memory changed under shader writes",
+        Volume,
+        Lower,
+    ),
+    m(
+        "late.why_sync",
+        "Settles for a synchronous submission or present",
+        Volume,
+        Lower,
+    ),
+    m(
+        "settle_wait.read_ms",
+        "Settle waits: title memory read",
         SubmitPath,
+        Lower,
+    ),
+    m(
+        "settle_wait.stale_ms",
+        "Settle waits: memory changed under shader writes",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "settle_wait.sync_ms",
+        "Settle waits: synchronous submission or present",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "settle_wait.value_ms",
+        "Settle waits: a wait for a memory value",
+        SubmitPath,
+        Lower,
+    ),
+    m(
+        "account.tex_uploads",
+        "Texture uploads recorded",
+        Volume,
+        Neither,
+    ),
+    m(
+        "account.until_record_ms",
+        "After a present, until the first list call",
+        Wall,
         Lower,
     ),
     m(
@@ -896,14 +980,13 @@ pub const COSTS: &[(&str, Option<&str>)] = &[
     ("frame.back_ms", None),
     ("account.back_scan_ms", Some("frame.back_ms")),
     ("account.back_sync_ms", Some("frame.back_ms")),
-    ("relay.fetch_wait_ms", Some("frame.back_ms")),
     ("recording.snapshot_ms", None),
     ("copies.watch_ms", None),
     ("whole.whole_ms", None),
     ("texrefresh.all_ms", None),
     ("heap.buffer_refresh_ms", None),
     ("heap.texture_stage_ms", None),
-    ("card.extra_wait_ms", None),
+    ("card.extra_wait_ms", Some("frame.back_ms")),
 ];
 
 /// The metrics of the headline tables, in order, by section.
@@ -934,6 +1017,7 @@ pub const SECTIONS: &[(&str, &[&str])] = &[
         &[
             "frame.copy_mb",
             "copies.title_copy_mb",
+            "copies.refreshes",
             "copies.refresh_mb",
             "copies.checked_mb",
             "copies.unchanged_mb",
@@ -941,12 +1025,17 @@ pub const SECTIONS: &[(&str, &[&str])] = &[
             "copies.unchanged_pct",
             "recording.whole_mb",
             "whole.whole_ms",
+            "copies.watches",
             "copies.watch_ms",
+            "recording.guard_ms",
+            "copies.page_faults",
             "card.sent_mb",
             "frame.texture_mb",
             "copies.tex_hashed_mb",
             "copies.tex_changed_mb",
             "texrefresh.all_ms",
+            "heap.texture_stage_ms",
+            "account.tex_uploads",
         ],
     ),
     (
@@ -956,6 +1045,7 @@ pub const SECTIONS: &[(&str, &[&str])] = &[
             "back.windows_compared_mib",
             "back.buffers_compared_mib",
             "back.snapshot_total_mib",
+            "recording.gpu_write_steps",
             "frame.back_mb",
             "back.written_pct",
             "recording.snapshot_ms",
@@ -964,18 +1054,29 @@ pub const SECTIONS: &[(&str, &[&str])] = &[
             "account.back_differ",
             "card.fetched_mb",
             "card.readback_copies",
+            "card.extra_wait_ms",
             "relay.fetch_wait_ms",
+            "relay.landing_ms",
         ],
     ),
     (
         "Synchronisation",
         &[
             "late.settles",
+            "late.why_read",
+            "late.why_read_fill",
+            "late.why_read_copy",
+            "late.why_read_texture",
+            "late.why_stale",
+            "late.why_sync",
             "late.wait_ms",
+            "settle_wait.read_ms",
+            "settle_wait.stale_ms",
+            "settle_wait.sync_ms",
+            "settle_wait.value_ms",
             "card_wait.nothing_back_ms",
             "card_wait.over32_ms",
             "card_wait.longest_ms",
-            "card.extra_wait_ms",
         ],
     ),
     (

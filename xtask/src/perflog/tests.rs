@@ -374,8 +374,8 @@ fn medians_and_p95_are_over_the_frame_lines() {
 fn costs_rank_the_deepest_parts() {
     let s = summary_of(&synthetic(&Spec::default()), &Selection::default());
     let top: Vec<&str> = s.top_costs().iter().map(|c| c.key.as_str()).collect();
-    // Leaves: back scan 60, cpu other 77.1, copies 40, textures 30, settle
-    // wait 19.84, snapshots 25 ...
+    // Leaves: cpu other 77.1, back scan 60, copies 40, textures 30,
+    // snapshots 25, settle wait 19.84 ...
     assert_eq!(
         top,
         [
